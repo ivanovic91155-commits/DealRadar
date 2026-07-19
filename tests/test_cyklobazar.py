@@ -8,6 +8,7 @@ from deal_radar.http import HttpError
 from deal_radar.models import Listing
 from deal_radar.sources.cyklobazar import (
     CyklobazarSource,
+    parse_detail_description,
     parse_detail_price,
     parse_html,
     parse_price_text,
@@ -18,6 +19,16 @@ FIXTURE = Path(__file__).parent / "fixtures" / "cyklobazar_list.html"
 
 
 class CyklobazarParserTest(unittest.TestCase):
+    def test_parses_full_detail_description_from_meta(self) -> None:
+        page = (
+            '<html><head><meta name="description" content="Merida One-Twenty 400, '
+            'velikost L &amp; kola 29. Pravidelný servis."></head></html>'
+        ).encode("utf-8")
+        self.assertEqual(
+            parse_detail_description(page),
+            "Merida One-Twenty 400, velikost L & kola 29. Pravidelný servis.",
+        )
+
     def setUp(self) -> None:
         self.profile = CyklobazarProfile(
             name="Cyklobazar Prague",

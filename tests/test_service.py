@@ -47,6 +47,83 @@ def make_listing(external_id: str, minutes: int) -> Listing:
 
 
 class ServiceBootstrapTest(unittest.TestCase):
+    def test_confirmed_cross_source_duplicate_sends_only_canonical_and_keeps_both(self) -> None:
+        class Finder:
+            def identify(self, listing):
+                return identify_bike(listing.title)
+
+            def find(self, listing, identity):
+                return Valuation(
+                    identified_product=identity.display_name,
+                    confidence="low",
+                    status="success",
+                    normalized_model_key=valuation_cache_key(identity),
+                    median_price_czk=50000,
+                    source_count=1,
+                    independent_source_count=1,
+                    offer_count=1,
+                    new_price_confidence="low",
+                )
+
+            def cache_ttl_hours(self, status):
+                return 24
+
+        description = (
+            "Complete Merida One-Twenty 400 trail bicycle, model year 2023, frame size L, "
+            "29 inch wheels, Shimano Deore drivetrain, hydraulic brakes and regular service history."
+        )
+        first = Listing(
+            source="bazos",
+            external_id="duplicate-b",
+            title="Merida One-Twenty 400 29 2023",
+            description=description,
+            url="https://bazos.example/merida",
+            profile="test",
+            price_czk=29000,
+            price_amount=29000,
+            price_status="numeric",
+            published_at=datetime.now(UTC),
+        )
+        second = Listing(
+            source="cyklobazar",
+            external_id="duplicate-c",
+            title="Merida One-Twenty 400 29 2023",
+            description=description,
+            url="https://cyklobazar.example/merida",
+            profile="test",
+            price_czk=29000,
+            price_amount=29000,
+            price_status="numeric",
+            published_at=datetime.now(UTC),
+        )
+        with TemporaryDirectory() as directory:
+            config = AppConfig(
+                database_path=str(Path(directory) / "state.sqlite3"),
+                bootstrap_mode="send_all",
+                profiles=[SearchProfile(name="test", rss_url="https://sport.bazos.cz/rss.php?hledat=kolo")],
+                telegram=TelegramConfig(bot_token="test", chat_id="1"),
+                retail=RetailConfig(enabled=True, lookup_delay_seconds=0),
+            )
+            service = DealRadarService(config)
+            telegram = FakeTelegram()
+            service.sources = [FakeSource([first, second])]
+            service._retail_finder = lambda: Finder()  # type: ignore[method-assign]
+            try:
+                stats = service.process_once(telegram)
+                self.assertEqual(telegram.sent, ["duplicate-b"])
+                self.assertEqual(stats["duplicate_groups"], 1)
+                self.assertEqual(stats["confirmed_duplicate_suppressed"], 1)
+                self.assertEqual(
+                    service.storage.connection.execute("SELECT COUNT(*) FROM listings").fetchone()[0],
+                    2,
+                )
+                canonical_analysis = service.storage.get_analysis("bazos", "duplicate-b")
+                duplicate_analysis = service.storage.get_analysis("cyklobazar", "duplicate-c")
+                self.assertEqual(canonical_analysis.duplicate_alternatives[0]["source"], "cyklobazar")
+                self.assertEqual(duplicate_analysis.notification_reason, "confirmed_cross_source_duplicate")
+            finally:
+                service.close()
+
     def test_first_run_sends_only_latest_then_only_new_ids(self) -> None:
         with TemporaryDirectory() as directory:
             config = AppConfig(

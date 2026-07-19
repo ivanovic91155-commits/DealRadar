@@ -206,6 +206,7 @@ class ListingAnalysis:
     analyzed_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     notification_status: str = "awaiting_analysis"
     notification_reason: str = ""
+    duplicate_alternatives: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

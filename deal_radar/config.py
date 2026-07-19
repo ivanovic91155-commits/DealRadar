@@ -166,6 +166,9 @@ class PriorityConfig:
     lookup_high_limit: int = 15
     lookup_max_limit: int = 20
     lookup_large_fraction: float = 0.20
+    duplicate_confirmed_similarity: float = 0.95
+    duplicate_possible_similarity: float = 0.85
+    duplicate_canonical_seen_tie_seconds: int = 300
     weights: dict[str, int] = field(default_factory=_default_priority_weights)
 
     def validate(self) -> None:
@@ -179,6 +182,8 @@ class PriorityConfig:
             raise ValueError("priority age limits must be positive")
         if not 0 < self.lookup_large_fraction <= 1 or self.lookup_max_limit < self.lookup_high_limit:
             raise ValueError("priority dynamic lookup budget settings are invalid")
+        if not 0 < self.duplicate_possible_similarity < self.duplicate_confirmed_similarity <= 1:
+            raise ValueError("priority duplicate similarity thresholds are invalid")
 
 
 @dataclass(slots=True)
@@ -299,6 +304,9 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
             lookup_high_limit=int(priority_raw.get("lookup_high_limit", 15)),
             lookup_max_limit=int(priority_raw.get("lookup_max_limit", 20)),
             lookup_large_fraction=float(priority_raw.get("lookup_large_fraction", 0.20)),
+            duplicate_confirmed_similarity=float(priority_raw.get("duplicate_confirmed_similarity", 0.95)),
+            duplicate_possible_similarity=float(priority_raw.get("duplicate_possible_similarity", 0.85)),
+            duplicate_canonical_seen_tie_seconds=int(priority_raw.get("duplicate_canonical_seen_tie_seconds", 300)),
             weights={
                 **_default_priority_weights(),
                 **{str(key): int(value) for key, value in priority_raw.get("weights", {}).items()},

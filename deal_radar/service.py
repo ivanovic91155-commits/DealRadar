@@ -7,13 +7,14 @@ from datetime import UTC, datetime
 
 from deal_radar.config import AppConfig
 from deal_radar.bike_identity import identify_listing
+from deal_radar.http import get_bytes
 from deal_radar.models import Listing, ListingAnalysis
 from deal_radar.price_sources import PriceSource, ZboziPriceSource
 from deal_radar.pricing import NewBikePriceService
 from deal_radar.pricing import valuation_cache_key
 from deal_radar.priority import build_analysis, dynamic_lookup_budget, select_lookup_candidates, select_notifications
 from deal_radar.sources.bazos import BazosSource
-from deal_radar.sources.cyklobazar import CyklobazarSource
+from deal_radar.sources.cyklobazar import CyklobazarSource, parse_detail_description
 from deal_radar.storage import Storage
 from deal_radar.telegram import TelegramClient, format_czk
 
@@ -101,6 +102,19 @@ class DealRadarService:
             LOGGER.warning("DEAL_RADAR_CODEX_ENABLED is ignored in stage 1.2; runtime AI is disabled")
         return NewBikePriceService(self.config.retail, sources, resolver=None)
 
+    def _duplicate_detail_description(self, listing: Listing) -> str:
+        if listing.source != "cyklobazar":
+            return ""
+        detail = get_bytes(
+            listing.url,
+            timeout=self.config.request_timeout_seconds,
+            headers={
+                "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
+                "Accept-Language": "cs,en;q=0.7",
+            },
+        )
+        return parse_detail_description(detail)
+
     def collect_feedback(self, telegram: TelegramClient | None = None) -> int:
         if not self.config.telegram.bot_token:
             return 0
@@ -147,6 +161,22 @@ class DealRadarService:
                 suppress_keys = {listing.key for listing in listings if listing.key not in allowed}
         new_listings = self.storage.register_new(listings, suppress_keys)
         inserted = len(new_listings)
+        duplicate_stats = self.storage.backfill_duplicates(
+            self.config.priority,
+            description_loader=self._duplicate_detail_description,
+        )
+        self.storage.refresh_duplicate_used_comparables(
+            self.config.priority.used_comparable_max_age_days
+        )
+        duplicate_suppressed_keys = {
+            listing.key
+            for listing in new_listings
+            if (
+                (record := self.storage.get_duplicate_record(listing)) is not None
+                and not bool(record["is_canonical"])
+                and record["match_level"] == "confirmed"
+            )
+        }
 
         telegram = telegram or self._telegram()
         feedback_count = self.collect_feedback(telegram)
@@ -175,16 +205,20 @@ class DealRadarService:
                 used_comparables=used,
                 cache_used=cache_used,
             )
+            analysis.duplicate_alternatives = self.storage.duplicate_alternatives(listing)
             if listing.key in suppress_keys:
                 analysis.notification_status = "not_selected"
                 analysis.notification_reason = "bootstrap_suppressed"
+            elif listing.key in duplicate_suppressed_keys:
+                analysis.notification_status = "not_selected"
+                analysis.notification_reason = "confirmed_cross_source_duplicate"
             self.storage.save_analysis(listing, analysis)
             analyzed[listing.key] = (listing, analysis)
 
         lookup_budget = dynamic_lookup_budget(len(new_listings), self.config.priority) if finder else 0
         lookup_pool = [
             value for key, value in analyzed.items()
-            if key not in suppress_keys
+            if key not in suppress_keys and key not in duplicate_suppressed_keys
         ]
         lookups = select_lookup_candidates(lookup_pool, lookup_budget)
         lookup_count = 0
@@ -215,6 +249,7 @@ class DealRadarService:
                     used_comparables=previous.used_comparables,
                     cache_used=False,
                 )
+                analysis.duplicate_alternatives = previous.duplicate_alternatives
                 analyzed[listing.key] = (listing, analysis)
                 self.storage.save_analysis(listing, analysis)
             except Exception as exc:
@@ -232,6 +267,8 @@ class DealRadarService:
         notification_pool: list[tuple[Listing, ListingAnalysis, float]] = []
         for key, (listing, analysis) in analyzed.items():
             if key in suppress_keys:
+                continue
+            if key in duplicate_suppressed_keys:
                 continue
             first_seen = self.storage.first_seen_at(listing)
             age_hours = max(0.0, (now - first_seen.astimezone(UTC)).total_seconds() / 3600)
@@ -309,6 +346,8 @@ class DealRadarService:
             "saved_without_send": inserted - sent,
             "expired": expired,
             "feedback": feedback_count,
+            "duplicate_groups": duplicate_stats["groups"],
+            "confirmed_duplicate_suppressed": len(duplicate_suppressed_keys),
         }
         LOGGER.info("Stage 1.2 cycle funnel: %s", stats)
         return stats

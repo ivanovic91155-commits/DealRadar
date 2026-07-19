@@ -5,6 +5,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from html import unescape
 from html.parser import HTMLParser
 from typing import Callable
 from urllib.parse import unquote, urljoin, urlparse
@@ -34,6 +35,16 @@ TITLE_HINTS = ("title", "name", "headline")
 DESCRIPTION_HINTS = ("description", "summary", "excerpt", "text")
 LOCATION_HINTS = ("location", "locality", "place", "city", "district")
 PRICE_HINTS = ("price", "cena")
+DETAIL_DESCRIPTION_PATTERNS = (
+    re.compile(
+        r'''<meta[^>]+(?:name|property)=["'](?:description|og:description)["'][^>]+content=["']([^"']+)["']''',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'''<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["'](?:description|og:description)["']''',
+        re.IGNORECASE,
+    ),
+)
 
 
 @dataclass(slots=True)
@@ -83,6 +94,15 @@ def parse_price_text(value: str, origin: str = "list_page") -> ParsedPrice:
     if raw:
         return ParsedPrice(raw_text=raw, status="parse_error", origin=origin)
     return ParsedPrice()
+
+
+def parse_detail_description(html_data: bytes) -> str:
+    page = html_data.decode("utf-8", errors="replace")
+    for pattern in DETAIL_DESCRIPTION_PATTERNS:
+        match = pattern.search(page)
+        if match:
+            return " ".join(unescape(match.group(1)).split())
+    return ""
 
 
 def _clean_text(parts: list[str]) -> str:

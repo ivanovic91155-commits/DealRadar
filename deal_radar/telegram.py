@@ -105,6 +105,11 @@ def _analysis_card_text(
     if identity:
         recognized = " ".join(part for part in (identity.brand, identity.model) if part)
         lines.append(f"🔎 Модель: {html.escape(recognized or 'не подтверждена')}")
+    for alternative in analysis.duplicate_alternatives[:2]:
+        source = SOURCE_LABELS.get(alternative.get("source", ""), alternative.get("source", ""))
+        url = html.escape(alternative.get("url", ""), quote=True)
+        if url:
+            lines.append(f'🔁 <a href="{url}">Также найдено на {html.escape(source)}</a>')
 
     if valuation and valuation.median_price_czk is not None:
         lines.append("")

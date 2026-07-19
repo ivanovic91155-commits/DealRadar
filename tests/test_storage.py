@@ -4,11 +4,155 @@ import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
-from deal_radar.models import Listing, Valuation
+from deal_radar.config import PriorityConfig
+from deal_radar.models import Listing, ListingAnalysis, UsedComparable, UsedComparables, Valuation
 from deal_radar.storage import Storage
 
 
 class StorageTest(unittest.TestCase):
+    def test_same_contact_requires_matching_price_and_similar_description(self) -> None:
+        first = Listing(
+            "bazos",
+            "seller-a",
+            "Trek Marlin 7 29 2025",
+            (
+                "Complete Trek Marlin bicycle with hydraulic brakes, original drivetrain, "
+                "regular service and clean frame. Contact +420 777 123 456."
+            ),
+            "https://bazos.example/seller-a",
+            "test",
+            price_czk=15000,
+        )
+        different_bike = Listing(
+            "bazos",
+            "seller-b",
+            "Trek Marlin 7 29 2025",
+            (
+                "Second bicycle sold after a crash, damaged fork, worn chain and wheels that "
+                "need rebuilding before riding. Contact +420 777 123 456."
+            ),
+            "https://bazos.example/seller-b",
+            "test",
+            price_czk=15000,
+        )
+        with TemporaryDirectory() as directory:
+            storage = Storage(str(Path(directory) / "state.sqlite3"))
+            storage.register([first, different_bike])
+            self.assertEqual(storage.find_used_comparables(first, max_age_days=30).count, 1)
+
+            repost = Listing.from_dict(different_bike.to_dict())
+            repost.description = first.description + " Reposted advertisement."
+            storage.register([repost])
+            self.assertEqual(storage.find_used_comparables(first, max_age_days=30).count, 0)
+            storage.close()
+
+    def test_possible_duplicate_is_excluded_from_used_comparables(self) -> None:
+        base = (
+            "Trek Marlin 7 complete mountain bicycle model 2025 frame L wheels 29 hydraulic brakes "
+            "Shimano drivetrain serviced fork clean frame original components ready to ride today"
+        )
+        words = base.split()
+        changed = " ".join(word for index, word in enumerate(words) if index not in set(range(4, 9)))
+        changed += " changed condition details"
+        first = Listing(
+            "bazos", "possible-b", "Trek Marlin 7 29 2025", base,
+            "https://bazos.example/possible", "test", price_czk=15000,
+        )
+        second = Listing(
+            "cyklobazar", "possible-c", "Trek Marlin 7 29 2025", changed,
+            "https://cyklobazar.example/possible", "test", price_czk=15000,
+        )
+        with TemporaryDirectory() as directory:
+            storage = Storage(str(Path(directory) / "state.sqlite3"))
+            storage.register([first, second])
+            stats = storage.backfill_duplicates(PriorityConfig())
+            self.assertEqual(stats["possible_groups"], 1)
+            self.assertEqual(storage.find_used_comparables(first, max_age_days=30).count, 0)
+            storage.close()
+
+    def test_duplicate_backfill_is_idempotent_preserves_rows_feedback_and_comparables(self) -> None:
+        full_description = (
+            "Prodám celoodpružené trailové kolo Merida One-Twenty 400 modelový rok 2023, "
+            "velikost rámu L a kola 29. Kolo má zdvih 130 mm vpředu a 120 mm vzadu. "
+            "Je vhodné na lesní traily, technický terén, výlety a běžné celodenní ježdění. "
+            "Pravidelný servis, teleskopická sedlovka, pohon Shimano Deore a hydraulické brzdy."
+        )
+        truncated = " ".join(full_description.split()[:30]) + " ..."
+        bazos = Listing(
+            source="bazos",
+            external_id="merida-b",
+            title='Merida One-Twenty 400 velikost L kola 29"',
+            description=truncated,
+            url="https://bazos.example/merida",
+            profile="test",
+            price_czk=29000,
+            price_amount=29000,
+            price_status="numeric",
+        )
+        cyklo = Listing(
+            source="cyklobazar",
+            external_id="merida-c",
+            title="Merida One-Twenty 400",
+            description="Trailová kola Praha Merida",
+            url="https://cyklobazar.example/merida",
+            profile="test",
+            price_czk=29000,
+            price_amount=29000,
+            price_status="numeric",
+        )
+        with TemporaryDirectory() as directory:
+            storage = Storage(str(Path(directory) / "state.sqlite3"))
+            storage.register([bazos, cyklo])
+            storage.record_feedback("bazos", "merida-b", "interesting")
+            storage.save_analysis(
+                bazos,
+                ListingAnalysis(
+                    48,
+                    "manual_review",
+                    used_comparables=UsedComparables(
+                        count=1,
+                        minimum_price_czk=29000,
+                        maximum_price_czk=29000,
+                        median_price_czk=29000,
+                        items=[
+                            UsedComparable(
+                                "cyklobazar",
+                                "merida-c",
+                                cyklo.title,
+                                cyklo.url,
+                                29000,
+                            )
+                        ],
+                        confidence="low",
+                    ),
+                ),
+            )
+            first = storage.backfill_duplicates(
+                PriorityConfig(),
+                description_loader=lambda listing: full_description,
+            )
+            record = storage.get_duplicate_record(bazos)
+            detected_at = record["detected_at"] if record else ""
+            self.assertEqual(first["confirmed_groups"], 1)
+            self.assertIsNotNone(record)
+            self.assertTrue(record["is_canonical"])
+            self.assertEqual(storage.duplicate_alternatives(bazos)[0]["source"], "cyklobazar")
+            self.assertEqual(storage.find_used_comparables(bazos, max_age_days=30).count, 0)
+            storage.refresh_duplicate_used_comparables(30)
+            refreshed = storage.get_analysis("bazos", "merida-b")
+            self.assertEqual(refreshed.used_comparables.count if refreshed and refreshed.used_comparables else None, 0)
+
+            second = storage.backfill_duplicates(
+                PriorityConfig(),
+                description_loader=lambda listing: full_description,
+            )
+            repeated = storage.get_duplicate_record(bazos)
+            self.assertEqual(first, second)
+            self.assertEqual(repeated["detected_at"] if repeated else "", detected_at)
+            self.assertEqual(storage.connection.execute("SELECT COUNT(*) FROM listings").fetchone()[0], 2)
+            self.assertEqual(storage.connection.execute("SELECT COUNT(*) FROM feedback").fetchone()[0], 1)
+            storage.close()
+
     def test_feedback_migration_preserves_old_rows_and_is_repeatable(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "old.sqlite3"

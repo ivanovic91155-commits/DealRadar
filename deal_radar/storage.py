@@ -3,10 +3,22 @@ from __future__ import annotations
 import json
 import sqlite3
 import statistics
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from deal_radar.bike_identity import has_accessory_terms, identify_listing, normalize_text
+from deal_radar.config import PriorityConfig
+from deal_radar.duplicates import (
+    DuplicateMatch,
+    compare_listings,
+    contact_fingerprint,
+    description_fingerprint,
+    duplicate_group_id,
+    normalize_duplicate_text,
+    text_similarity,
+)
 from deal_radar.models import Listing, ListingAnalysis, UsedComparable, UsedComparables, Valuation
 
 
@@ -55,6 +67,21 @@ class Storage:
                 data_json TEXT NOT NULL,
                 expires_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS listing_duplicates (
+                group_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                external_id TEXT NOT NULL,
+                canonical_source TEXT NOT NULL,
+                canonical_external_id TEXT NOT NULL,
+                match_level TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                similarity_score REAL NOT NULL,
+                detected_at TEXT NOT NULL,
+                is_canonical INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (source, external_id)
+            );
+            CREATE INDEX IF NOT EXISTS listing_duplicates_group_idx
+            ON listing_duplicates(group_id);
             """
         )
         feedback_columns = {
@@ -85,6 +112,7 @@ class Storage:
             ("notification_status", "TEXT NOT NULL DEFAULT 'awaiting_analysis'"),
             ("notification_reason", "TEXT NOT NULL DEFAULT ''"),
             ("last_seen_at", "TEXT NOT NULL DEFAULT ''"),
+            ("description_fingerprint", "TEXT NOT NULL DEFAULT ''"),
         ):
             if name not in listing_columns:
                 self.connection.execute(f"ALTER TABLE listings ADD COLUMN {name} {definition}")
@@ -129,8 +157,9 @@ class Storage:
                     """
                     INSERT OR IGNORE INTO listings
                     (source, external_id, data_json, first_seen_at, suppressed,
-                     notification_status, notification_reason, last_seen_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     notification_status, notification_reason, last_seen_at,
+                     description_fingerprint)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         listing.source,
@@ -141,6 +170,7 @@ class Storage:
                         "not_selected" if suppressed else "awaiting_analysis",
                         "bootstrap_suppressed" if suppressed else "",
                         _now(),
+                        description_fingerprint(listing.description),
                     ),
                 )
                 if cursor.rowcount:
@@ -148,12 +178,14 @@ class Storage:
                 if cursor.rowcount == 0:
                     self.connection.execute(
                         """
-                        UPDATE listings SET data_json = ?, last_seen_at = ?
+                        UPDATE listings SET data_json = ?, last_seen_at = ?,
+                            description_fingerprint = ?
                         WHERE source = ? AND external_id = ?
                         """,
                         (
                             json.dumps(listing.to_dict(), ensure_ascii=False),
                             _now(),
+                            description_fingerprint(listing.description),
                             listing.source,
                             listing.external_id,
                         ),
@@ -228,6 +260,224 @@ class Storage:
                 (status, reason, listing.source, listing.external_id),
             )
 
+    @staticmethod
+    def _choose_duplicate_canonical(
+        records: list[tuple[Listing, datetime]],
+        config: PriorityConfig,
+    ) -> Listing:
+        earliest = min(first_seen for _, first_seen in records)
+        tied = [
+            (listing, first_seen)
+            for listing, first_seen in records
+            if (first_seen - earliest).total_seconds() <= config.duplicate_canonical_seen_tie_seconds
+        ]
+
+        def key(item: tuple[Listing, datetime]) -> tuple[object, ...]:
+            listing, _ = item
+            price = listing.price_amount if listing.price_amount is not None else listing.price_czk
+            return (
+                -len(normalize_text(listing.description)),
+                0 if price else 1,
+                0 if listing.image_url else 1,
+                0 if listing.published_at else 1,
+                0 if listing.location else 1,
+                listing.key,
+            )
+
+        return sorted(tied, key=key)[0][0]
+
+    def backfill_duplicates(
+        self,
+        config: PriorityConfig,
+        *,
+        description_loader: Callable[[Listing], str] | None = None,
+    ) -> dict[str, int]:
+        rows = self.connection.execute(
+            "SELECT source, external_id, data_json, first_seen_at FROM listings"
+        ).fetchall()
+        records = [
+            (
+                Listing.from_dict(json.loads(row["data_json"])),
+                datetime.fromisoformat(row["first_seen_at"]),
+            )
+            for row in rows
+        ]
+        parent = {listing.key: listing.key for listing, _ in records}
+        by_key = {listing.key: (listing, first_seen) for listing, first_seen in records}
+        matches: dict[frozenset[str], DuplicateMatch] = {}
+        detail_cache: dict[str, str] = {}
+
+        def root(key: str) -> str:
+            while parent[key] != key:
+                parent[key] = parent[parent[key]]
+                key = parent[key]
+            return key
+
+        def union(first: str, second: str) -> None:
+            left, right = root(first), root(second)
+            if left != right:
+                parent[max(left, right)] = min(left, right)
+
+        for index, (listing, _) in enumerate(records):
+            for candidate, _ in records[index + 1 :]:
+                match = compare_listings(
+                    listing,
+                    candidate,
+                    confirmed_threshold=config.duplicate_confirmed_similarity,
+                    possible_threshold=config.duplicate_possible_similarity,
+                )
+                if (
+                    match.level == "none"
+                    and match.reason == "text_similarity_below_threshold"
+                    and description_loader is not None
+                ):
+                    compared: list[Listing] = []
+                    for item in (listing, candidate):
+                        description = item.description
+                        if item.source == "cyklobazar" and len(description) < 300:
+                            if item.key not in detail_cache:
+                                try:
+                                    detail_cache[item.key] = description_loader(item)
+                                except Exception:
+                                    detail_cache[item.key] = ""
+                            description = detail_cache[item.key] or description
+                        compared.append(replace(item, description=description))
+                    match = compare_listings(
+                        compared[0],
+                        compared[1],
+                        confirmed_threshold=config.duplicate_confirmed_similarity,
+                        possible_threshold=config.duplicate_possible_similarity,
+                    )
+                if match.level in {"confirmed", "possible"}:
+                    matches[frozenset((listing.key, candidate.key))] = match
+                    union(listing.key, candidate.key)
+
+        components: dict[str, list[str]] = {}
+        for key in parent:
+            components.setdefault(root(key), []).append(key)
+        groups = [sorted(keys) for keys in components.values() if len(keys) > 1]
+        existing_times = {
+            str(row["group_id"]): str(row["detected_at"])
+            for row in self.connection.execute(
+                "SELECT group_id, MIN(detected_at) AS detected_at FROM listing_duplicates GROUP BY group_id"
+            )
+        }
+        confirmed_groups = 0
+        possible_groups = 0
+        with self.connection:
+            for listing, _ in records:
+                self.connection.execute(
+                    """
+                    UPDATE listings SET description_fingerprint = ?
+                    WHERE source = ? AND external_id = ?
+                    """,
+                    (description_fingerprint(listing.description), listing.source, listing.external_id),
+                )
+            self.connection.execute("DELETE FROM listing_duplicates")
+            for keys in groups:
+                group_id = duplicate_group_id(keys)
+                component_records = [by_key[key] for key in keys]
+                canonical = self._choose_duplicate_canonical(component_records, config)
+                edge_matches = [
+                    match
+                    for pair, match in matches.items()
+                    if pair.issubset(set(keys))
+                ]
+                group_level = "confirmed" if any(match.level == "confirmed" for match in edge_matches) else "possible"
+                if group_level == "confirmed":
+                    confirmed_groups += 1
+                else:
+                    possible_groups += 1
+                detected_at = existing_times.get(group_id, _now())
+                for key in keys:
+                    member = by_key[key][0]
+                    pair_match = matches.get(frozenset((canonical.key, key))) if key != canonical.key else None
+                    similarity = (
+                        pair_match.similarity
+                        if pair_match is not None
+                        else max((match.similarity for match in edge_matches), default=0.0)
+                    )
+                    reason = pair_match.reason if pair_match is not None else "duplicate_group_canonical"
+                    match_level = pair_match.level if pair_match is not None else group_level
+                    self.connection.execute(
+                        """
+                        INSERT INTO listing_duplicates
+                        (group_id, source, external_id, canonical_source, canonical_external_id,
+                         match_level, reason, similarity_score, detected_at, is_canonical)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            group_id,
+                            member.source,
+                            member.external_id,
+                            canonical.source,
+                            canonical.external_id,
+                            match_level,
+                            reason,
+                            similarity,
+                            detected_at,
+                            int(member.key == canonical.key),
+                        ),
+                    )
+        return {
+            "groups": len(groups),
+            "confirmed_groups": confirmed_groups,
+            "possible_groups": possible_groups,
+            "members": sum(len(keys) for keys in groups),
+        }
+
+    def get_duplicate_record(self, listing: Listing) -> sqlite3.Row | None:
+        return self.connection.execute(
+            "SELECT * FROM listing_duplicates WHERE source = ? AND external_id = ?",
+            (listing.source, listing.external_id),
+        ).fetchone()
+
+    def duplicate_alternatives(self, listing: Listing) -> list[dict[str, str]]:
+        record = self.get_duplicate_record(listing)
+        if not record or not record["is_canonical"] or record["match_level"] != "confirmed":
+            return []
+        rows = self.connection.execute(
+            """
+            SELECT d.source, d.external_id, l.data_json
+            FROM listing_duplicates d
+            JOIN listings l ON l.source = d.source AND l.external_id = d.external_id
+            WHERE d.group_id = ? AND d.is_canonical = 0 AND d.match_level = 'confirmed'
+            ORDER BY d.source, d.external_id
+            """,
+            (record["group_id"],),
+        ).fetchall()
+        return [
+            {
+                "source": str(row["source"]),
+                "external_id": str(row["external_id"]),
+                "url": Listing.from_dict(json.loads(row["data_json"])).url,
+            }
+            for row in rows
+        ]
+
+    def refresh_duplicate_used_comparables(self, max_age_days: int) -> int:
+        rows = self.connection.execute(
+            """
+            SELECT l.data_json
+            FROM listings l
+            JOIN listing_duplicates d ON d.source = l.source AND d.external_id = l.external_id
+            """
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            listing = Listing.from_dict(json.loads(row["data_json"]))
+            analysis = self.get_analysis(listing.source, listing.external_id)
+            if analysis is None:
+                continue
+            analysis.used_comparables = self.find_used_comparables(
+                listing,
+                max_age_days=max_age_days,
+            )
+            analysis.duplicate_alternatives = self.duplicate_alternatives(listing)
+            self.save_analysis(listing, analysis)
+            updated += 1
+        return updated
+
     def find_used_comparables(
         self,
         listing: Listing,
@@ -238,8 +488,22 @@ class Storage:
         if not identity.brand or not identity.model:
             return UsedComparables()
         cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+        duplicate_rows = self.connection.execute(
+            "SELECT source, external_id, group_id FROM listing_duplicates"
+        ).fetchall()
+        duplicate_groups = {
+            f"{row['source']}:{row['external_id']}": str(row["group_id"])
+            for row in duplicate_rows
+        }
+        listing_group = duplicate_groups.get(listing.key, "")
+        listing_description_fingerprint = description_fingerprint(listing.description)
+        listing_description_is_substantive = len(normalize_duplicate_text(listing.description)) >= 80
+        listing_contact = contact_fingerprint(f"{listing.title}\n{listing.description}")
         rows = self.connection.execute(
-            "SELECT source, external_id, data_json, first_seen_at FROM listings WHERE last_seen_at >= ?",
+            """
+            SELECT source, external_id, data_json, first_seen_at, description_fingerprint
+            FROM listings WHERE last_seen_at >= ?
+            """,
             (cutoff.isoformat(),),
         ).fetchall()
         matches: list[UsedComparable] = []
@@ -248,7 +512,34 @@ class Storage:
             candidate = Listing.from_dict(json.loads(row["data_json"]))
             if candidate.key == listing.key or candidate.url in seen_urls:
                 continue
-            price = candidate.price_amount if candidate.price_amount is not None else candidate.price_czk
+            candidate_group = duplicate_groups.get(candidate.key, "")
+            if listing_group and candidate_group == listing_group:
+                continue
+            candidate_fingerprint = str(row["description_fingerprint"] or "")
+            if (
+                listing_description_is_substantive
+                and listing_description_fingerprint
+                and len(normalize_duplicate_text(candidate.description)) >= 80
+                and candidate_fingerprint == listing_description_fingerprint
+            ):
+                continue
+            listing_price = (
+                listing.price_amount if listing.price_amount is not None else listing.price_czk
+            )
+            candidate_price = (
+                candidate.price_amount
+                if candidate.price_amount is not None
+                else candidate.price_czk
+            )
+            candidate_contact = contact_fingerprint(f"{candidate.title}\n{candidate.description}")
+            if (
+                listing_contact
+                and listing_contact == candidate_contact
+                and listing_price == candidate_price
+                and text_similarity(listing.description, candidate.description) >= 0.85
+            ):
+                continue
+            price = candidate_price
             if not price or price <= 0 or has_accessory_terms(candidate.title):
                 continue
             candidate_identity = identify_listing(candidate)

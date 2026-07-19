@@ -127,6 +127,13 @@ class TelegramFeedbackTest(unittest.TestCase):
                 median_price_czk=17000,
                 confidence="medium",
             ),
+            duplicate_alternatives=[
+                {
+                    "source": "bazos",
+                    "external_id": "other",
+                    "url": "https://sport.bazos.cz/inzerat/other/bike.php",
+                }
+            ],
         )
         telegram = ApiTelegram()
         telegram.send_listing(
@@ -143,6 +150,7 @@ class TelegramFeedbackTest(unittest.TestCase):
         self.assertIn("Похожие активные б/у объявления", fields["text"])
         self.assertIn("не подтверждённые цены продажи", fields["text"])
         self.assertIn("https://shop.example/trek", fields["text"])
+        self.assertIn("Также найдено на Bazoš", fields["text"])
         keyboard = json.loads(fields["reply_markup"])
         callbacks = [
             button["callback_data"]

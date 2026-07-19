@@ -103,6 +103,9 @@
     "lookup_high_limit": 15,
     "lookup_max_limit": 20,
     "lookup_large_fraction": 0.20,
+    "duplicate_confirmed_similarity": 0.95,
+    "duplicate_possible_similarity": 0.85,
+    "duplicate_canonical_seen_tie_seconds": 300,
     "weights": {
       "very_fresh": 15,
       "brand_recognized": 5,
