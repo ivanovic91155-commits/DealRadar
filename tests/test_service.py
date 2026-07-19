@@ -5,7 +5,8 @@ import unittest
 
 from deal_radar.config import AppConfig, RetailConfig, SearchProfile, TelegramConfig
 from deal_radar.bike_identity import identify_bike
-from deal_radar.models import Listing
+from deal_radar.models import Listing, Valuation
+from deal_radar.pricing import valuation_cache_key
 from deal_radar.service import DealRadarService
 
 
@@ -22,7 +23,7 @@ class FakeTelegram:
     def __init__(self) -> None:
         self.sent: list[str] = []
 
-    def send_listing(self, listing: Listing, retail_enabled: bool) -> int:
+    def send_listing(self, listing: Listing, retail_enabled: bool, analysis=None) -> int:
         self.sent.append(listing.external_id)
         return 100 + len(self.sent)
 
@@ -34,11 +35,14 @@ def make_listing(external_id: str, minutes: int) -> Listing:
     return Listing(
         source="bazos",
         external_id=external_id,
-        title=f"Bike {external_id}",
+        title="Trek Marlin 7 Gen 3 29 2025",
         description="Complete bike",
         url=f"https://sport.bazos.cz/inzerat/{external_id}/bike.php",
         profile="test",
         published_at=datetime.now(UTC) + timedelta(minutes=minutes),
+        price_czk=14900,
+        price_amount=14900,
+        price_status="numeric",
     )
 
 
@@ -73,6 +77,99 @@ class ServiceBootstrapTest(unittest.TestCase):
             finally:
                 service.close()
 
+    def test_price_lookup_reorders_notifications_and_all_listings_stay_saved(self) -> None:
+        class Finder:
+            def identify(self, listing):
+                return identify_bike(listing.title)
+
+            def find(self, listing, identity):
+                price = 60000 if listing.external_id == "1" else 20000
+                return Valuation(
+                    identified_product=identity.display_name,
+                    confidence="low",
+                    status="success",
+                    normalized_model_key=valuation_cache_key(identity),
+                    median_price_czk=price,
+                    source_count=1,
+                    independent_source_count=1,
+                    offer_count=1,
+                    new_price_confidence="low",
+                )
+
+            def cache_ttl_hours(self, status):
+                return 24
+
+        with TemporaryDirectory() as directory:
+            config = AppConfig(
+                database_path=str(Path(directory) / "state.sqlite3"),
+                bootstrap_mode="send_all",
+                profiles=[SearchProfile(name="test", rss_url="https://sport.bazos.cz/rss.php?hledat=kolo")],
+                telegram=TelegramConfig(bot_token="test", chat_id="1"),
+                retail=RetailConfig(enabled=True, lookup_delay_seconds=0),
+            )
+            service = DealRadarService(config)
+            telegram = FakeTelegram()
+            service.sources = [FakeSource([make_listing("2", 2), make_listing("1", 1)])]
+            service._retail_finder = lambda: Finder()  # type: ignore[method-assign]
+            try:
+                result = service.process_once(telegram)
+                self.assertEqual(telegram.sent, ["1", "2"])
+                self.assertEqual(result["new"], 2)
+                self.assertEqual(
+                    service.storage.connection.execute("SELECT COUNT(*) FROM listings").fetchone()[0],
+                    2,
+                )
+            finally:
+                service.close()
+
+    def test_cached_price_does_not_call_finder_or_spend_budget(self) -> None:
+        class CachedFinder:
+            def identify(self, listing):
+                return identify_bike(listing.title)
+
+            def as_cached(self, value):
+                value.status = "cached"
+                value.cache_used = True
+                return value
+
+            def find(self, listing, identity):
+                raise AssertionError("cache should prevent lookup")
+
+        with TemporaryDirectory() as directory:
+            config = AppConfig(
+                database_path=str(Path(directory) / "state.sqlite3"),
+                bootstrap_mode="send_all",
+                profiles=[SearchProfile(name="test", rss_url="https://sport.bazos.cz/rss.php?hledat=kolo")],
+                telegram=TelegramConfig(bot_token="test", chat_id="1"),
+                retail=RetailConfig(enabled=True, lookup_delay_seconds=0),
+            )
+            service = DealRadarService(config)
+            item = make_listing("cached", 1)
+            identity = identify_bike(item.title)
+            service.storage.cache_valuation_hours(
+                valuation_cache_key(identity),
+                Valuation(
+                    identified_product=identity.display_name,
+                    confidence="low",
+                    status="success",
+                    normalized_model_key=valuation_cache_key(identity),
+                    median_price_czk=30000,
+                    source_count=1,
+                    independent_source_count=1,
+                    offer_count=1,
+                    new_price_confidence="low",
+                ),
+                24,
+            )
+            service.sources = [FakeSource([item])]
+            service._retail_finder = lambda: CachedFinder()  # type: ignore[method-assign]
+            try:
+                result = service.process_once(FakeTelegram())
+                self.assertEqual(result["cache_hits"], 1)
+                self.assertEqual(result["price_lookups"], 0)
+            finally:
+                service.close()
+
     def test_price_failure_does_not_block_listing_alert(self) -> None:
         class FailingFinder:
             def identify(self, listing):
@@ -96,7 +193,7 @@ class ServiceBootstrapTest(unittest.TestCase):
             try:
                 result = service.process_once()
                 self.assertEqual(result["sent"], 1)
-                self.assertEqual(result["enriched"], 0)
+                self.assertEqual(result["price_lookups"], 1)
                 self.assertEqual(telegram.sent, ["9"])
             finally:
                 service.close()

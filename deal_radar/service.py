@@ -3,13 +3,15 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import UTC, datetime
 
 from deal_radar.config import AppConfig
-from deal_radar.codex_fallback import CodexMatchResolver
-from deal_radar.models import Listing
+from deal_radar.bike_identity import identify_listing
+from deal_radar.models import Listing, ListingAnalysis
 from deal_radar.price_sources import PriceSource, ZboziPriceSource
 from deal_radar.pricing import NewBikePriceService
+from deal_radar.pricing import valuation_cache_key
+from deal_radar.priority import build_analysis, dynamic_lookup_budget, select_lookup_candidates, select_notifications
 from deal_radar.sources.bazos import BazosSource
 from deal_radar.sources.cyklobazar import CyklobazarSource
 from deal_radar.storage import Storage
@@ -95,16 +97,9 @@ class DealRadarService:
                     max_parallel_requests=self.config.retail.max_parallel_requests,
                 )
             )
-        resolver = None
         if self.config.retail.codex_enabled:
-            resolver = CodexMatchResolver(
-                executable=self.config.retail.codex_path,
-                schema_path=self.config.retail.codex_schema_path,
-                timeout_seconds=self.config.retail.codex_timeout_seconds,
-                calls_per_hour=self.config.retail.codex_calls_per_hour,
-                calls_per_day=self.config.retail.codex_calls_per_day,
-            )
-        return NewBikePriceService(self.config.retail, sources, resolver)
+            LOGGER.warning("DEAL_RADAR_CODEX_ENABLED is ignored in stage 1.2; runtime AI is disabled")
+        return NewBikePriceService(self.config.retail, sources, resolver=None)
 
     def collect_feedback(self, telegram: TelegramClient | None = None) -> int:
         if not self.config.telegram.bot_token:
@@ -150,46 +145,173 @@ class DealRadarService:
             elif self.config.bootstrap_mode == "send_latest":
                 allowed = {listing.key for listing in listings[: self.config.max_initial_notifications]}
                 suppress_keys = {listing.key for listing in listings if listing.key not in allowed}
-        inserted = self.storage.register(listings, suppress_keys)
+        new_listings = self.storage.register_new(listings, suppress_keys)
+        inserted = len(new_listings)
 
         telegram = telegram or self._telegram()
         feedback_count = self.collect_feedback(telegram)
-        pending = self.storage.pending(self.config.max_notifications_per_run)
         finder = self._retail_finder()
-        enrichments_left = self.config.retail.max_enrichments_per_run
-        sent = 0
-        enriched = 0
-        for listing in pending:
-            message_id = telegram.send_listing(listing, retail_enabled=finder is not None)
-            self.storage.mark_sent(listing, message_id)
-            sent += 1
-            LOGGER.info("Sent %s", listing.key)
-            if finder is None or enrichments_left <= 0:
+        analyzed: dict[str, tuple[Listing, ListingAnalysis]] = {}
+        cache_hits = 0
+        for listing in new_listings:
+            identity = finder.identify(listing) if finder else identify_listing(listing)
+            used = self.storage.find_used_comparables(
+                listing,
+                max_age_days=self.config.priority.used_comparable_max_age_days,
+            )
+            valuation = None
+            cache_used = False
+            if finder and identity.brand and identity.model:
+                cached = self.storage.get_cached_valuation(valuation_cache_key(identity))
+                if cached is not None:
+                    valuation = finder.as_cached(cached)
+                    cache_used = True
+                    cache_hits += 1
+            analysis = build_analysis(
+                listing,
+                self.config.priority,
+                identity=identity,
+                valuation=valuation,
+                used_comparables=used,
+                cache_used=cache_used,
+            )
+            if listing.key in suppress_keys:
+                analysis.notification_status = "not_selected"
+                analysis.notification_reason = "bootstrap_suppressed"
+            self.storage.save_analysis(listing, analysis)
+            analyzed[listing.key] = (listing, analysis)
+
+        lookup_budget = dynamic_lookup_budget(len(new_listings), self.config.priority) if finder else 0
+        lookup_pool = [
+            value for key, value in analyzed.items()
+            if key not in suppress_keys
+        ]
+        lookups = select_lookup_candidates(lookup_pool, lookup_budget)
+        lookup_count = 0
+        consecutive_errors = 0
+        for index, (listing, previous) in enumerate(lookups):
+            if consecutive_errors >= self.config.retail.max_consecutive_source_errors:
+                LOGGER.warning("Price lookups stopped after %d consecutive errors", consecutive_errors)
+                break
+            if index and self.config.retail.lookup_delay_seconds > 0:
+                time.sleep(self.config.retail.lookup_delay_seconds)
+            identity = previous.identity
+            if identity is None:
                 continue
-            enrichments_left -= 1
-            identity = finder.identify(listing)
-            cache_key = identity.normalized_key
-            valuation = self.storage.get_cached_valuation(cache_key)
+            lookup_count += 1
             try:
-                if valuation is None:
-                    valuation = finder.find(listing, identity)
-                    self.storage.cache_valuation_hours(
-                        cache_key,
-                        valuation,
-                        finder.cache_ttl_hours(valuation.status),
-                    )
-                else:
-                    valuation = finder.as_cached(valuation)
-                telegram.send_valuation(
-                    listing,
+                valuation = finder.find(listing, identity)
+                self.storage.cache_valuation_hours(
+                    valuation_cache_key(identity),
                     valuation,
-                    message_id,
-                    max_sources=self.config.retail.max_telegram_sources,
+                    finder.cache_ttl_hours(valuation.status),
                 )
-                enriched += 1
-            except Exception:
-                LOGGER.exception("Retail valuation failed for %s; urgent listing alert was still delivered", listing.key)
-        return {"fetched": len(listings), "inserted": inserted, "sent": sent, "enriched": enriched, "feedback": feedback_count}
+                consecutive_errors = 0
+                analysis = build_analysis(
+                    listing,
+                    self.config.priority,
+                    identity=identity,
+                    valuation=valuation,
+                    used_comparables=previous.used_comparables,
+                    cache_used=False,
+                )
+                analyzed[listing.key] = (listing, analysis)
+                self.storage.save_analysis(listing, analysis)
+            except Exception as exc:
+                consecutive_errors += 1
+                previous.risks.append(f"Поиск новой цены завершился ошибкой {type(exc).__name__}.")
+                previous.preliminary_priority_score = max(
+                    previous.preliminary_priority_score,
+                    self.config.priority.manual_review_min_score,
+                )
+                previous.priority_class = "manual_review"
+                self.storage.save_analysis(listing, previous)
+                LOGGER.exception("Retail valuation failed for %s; listing remains eligible", listing.key)
+
+        now = datetime.now(UTC)
+        notification_pool: list[tuple[Listing, ListingAnalysis, float]] = []
+        for key, (listing, analysis) in analyzed.items():
+            if key in suppress_keys:
+                continue
+            first_seen = self.storage.first_seen_at(listing)
+            age_hours = max(0.0, (now - first_seen.astimezone(UTC)).total_seconds() / 3600)
+            notification_pool.append((listing, analysis, age_hours))
+        selected = select_notifications(notification_pool, self.config.priority)
+        selected_keys = {listing.key for listing, _ in selected}
+
+        sent = 0
+        for listing, analysis in selected:
+            try:
+                message_id = telegram.send_listing(
+                    listing,
+                    retail_enabled=False,
+                    analysis=analysis,
+                )
+                self.storage.mark_sent(listing, message_id)
+                analysis.notification_status = "sent"
+                analysis.notification_reason = ""
+                self.storage.save_analysis(listing, analysis)
+                sent += 1
+                valuation = analysis.valuation
+                LOGGER.info(
+                    "Selected %s score=%d class=%s confidence=%s cache=%s sources=%d reasons=%s",
+                    listing.key,
+                    analysis.preliminary_priority_score,
+                    analysis.priority_class,
+                    analysis.analysis_confidence,
+                    analysis.cache_used,
+                    valuation.independent_source_count if valuation else 0,
+                    "; ".join(analysis.reasons[:4]),
+                )
+            except Exception as exc:
+                analysis.notification_status = "analysis_failed"
+                analysis.notification_reason = f"telegram_{type(exc).__name__}"
+                self.storage.save_analysis(listing, analysis)
+                LOGGER.exception("Telegram delivery failed for %s", listing.key)
+
+        expired = 0
+        for listing, analysis, age_hours in notification_pool:
+            if listing.key in selected_keys:
+                continue
+            if analysis.priority_class == "excluded":
+                status, reason = "excluded", analysis.notification_reason or "hard_filter"
+            elif age_hours > self.config.priority.individual_notification_max_age_hours:
+                status, reason = "expired", "individual_notification_too_old"
+                expired += 1
+            elif analysis.priority_class == "low_priority":
+                status, reason = "low_priority", "score_below_manual_review_threshold"
+            else:
+                status, reason = "not_selected", "notification_slots_exhausted"
+            analysis.notification_status = status
+            analysis.notification_reason = reason
+            self.storage.save_analysis(listing, analysis)
+
+        final_analyses = [analysis for _, analysis in analyzed.values()]
+        one_source = sum(bool(item.valuation and item.valuation.independent_source_count == 1) for item in final_analyses)
+        two_sources = sum(bool(item.valuation and item.valuation.independent_source_count == 2) for item in final_analyses)
+        three_plus = sum(bool(item.valuation and item.valuation.independent_source_count >= 3) for item in final_analyses)
+        stats = {
+            "fetched": len(listings),
+            "new": inserted,
+            "hard_excluded": sum(item.priority_class == "excluded" for item in final_analyses),
+            "scored": len(final_analyses),
+            "cache_hits": cache_hits,
+            "price_lookups": lookup_count,
+            "one_source": one_source,
+            "two_sources": two_sources,
+            "three_plus_sources": three_plus,
+            "price_not_found": sum(not item.valuation or item.valuation.median_price_czk is None for item in final_analyses),
+            "urgent": sum(item.priority_class == "urgent_candidate" for item in final_analyses),
+            "interesting": sum(item.priority_class == "interesting_candidate" for item in final_analyses),
+            "manual_review": sum(item.priority_class == "manual_review" for item in final_analyses),
+            "low_priority": sum(item.priority_class == "low_priority" for item in final_analyses),
+            "sent": sent,
+            "saved_without_send": inserted - sent,
+            "expired": expired,
+            "feedback": feedback_count,
+        }
+        LOGGER.info("Stage 1.2 cycle funnel: %s", stats)
+        return stats
 
     def run_forever(self) -> None:
         LOGGER.info(

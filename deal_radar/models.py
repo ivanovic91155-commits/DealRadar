@@ -104,6 +104,8 @@ class RetailOffer:
     match_score: float = 0.0
     collected_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     exclusion_reason: str = ""
+    store_domain: str = ""
+    acceptance_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -131,6 +133,12 @@ class Valuation:
     discount_percent: int | None = None
     checked_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     identity: BikeIdentity | None = None
+    offer_count: int = 0
+    independent_source_count: int = 0
+    new_price_confidence: str = "insufficient"
+    new_price_confidence_reasons: list[str] = field(default_factory=list)
+    cache_used: bool = False
+    rejected_offers: list[RetailOffer] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -139,7 +147,77 @@ class Valuation:
     def from_dict(cls, data: dict[str, Any]) -> "Valuation":
         copy = dict(data)
         copy["comparables"] = [RetailOffer.from_dict(item) for item in copy.get("comparables", [])]
+        copy["rejected_offers"] = [RetailOffer.from_dict(item) for item in copy.get("rejected_offers", [])]
         if isinstance(copy.get("identity"), dict):
             copy["identity"] = BikeIdentity.from_dict(copy["identity"])
+        allowed = {item.name for item in fields(cls)}
+        return cls(**{key: value for key, value in copy.items() if key in allowed})
+
+
+@dataclass(slots=True)
+class UsedComparable:
+    source: str
+    external_id: str
+    title: str
+    url: str
+    price_czk: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "UsedComparable":
+        allowed = {item.name for item in fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in allowed})
+
+
+@dataclass(slots=True)
+class UsedComparables:
+    count: int = 0
+    minimum_price_czk: int | None = None
+    maximum_price_czk: int | None = None
+    median_price_czk: int | None = None
+    items: list[UsedComparable] = field(default_factory=list)
+    checked_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    confidence: str = "insufficient"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "UsedComparables":
+        copy = dict(data)
+        copy["items"] = [UsedComparable.from_dict(item) for item in copy.get("items", [])]
+        allowed = {item.name for item in fields(cls)}
+        return cls(**{key: value for key, value in copy.items() if key in allowed})
+
+
+@dataclass(slots=True)
+class ListingAnalysis:
+    preliminary_priority_score: int
+    priority_class: str
+    reasons: list[str] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
+    analysis_confidence: str = "low"
+    identity: BikeIdentity | None = None
+    valuation: Valuation | None = None
+    used_comparables: UsedComparables | None = None
+    cache_used: bool = False
+    analyzed_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    notification_status: str = "awaiting_analysis"
+    notification_reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ListingAnalysis":
+        copy = dict(data)
+        if isinstance(copy.get("identity"), dict):
+            copy["identity"] = BikeIdentity.from_dict(copy["identity"])
+        if isinstance(copy.get("valuation"), dict):
+            copy["valuation"] = Valuation.from_dict(copy["valuation"])
+        if isinstance(copy.get("used_comparables"), dict):
+            copy["used_comparables"] = UsedComparables.from_dict(copy["used_comparables"])
         allowed = {item.name for item in fields(cls)}
         return cls(**{key: value for key, value in copy.items() if key in allowed})

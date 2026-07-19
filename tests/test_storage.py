@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -38,6 +39,11 @@ class StorageTest(unittest.TestCase):
                 self.assertIn("callback_query_id", columns)
                 self.assertIn("telegram_message_id", columns)
                 self.assertIn("telegram_chat_id", columns)
+                listing_columns = {
+                    row["name"] for row in storage.connection.execute("PRAGMA table_info(listings)")
+                }
+                self.assertIn("analysis_json", listing_columns)
+                self.assertIn("notification_status", listing_columns)
                 self.assertEqual(
                     storage.connection.execute("SELECT COUNT(*) FROM feedback").fetchone()[0],
                     1,
@@ -60,6 +66,68 @@ class StorageTest(unittest.TestCase):
             self.assertEqual(len(storage.pending(10)), 1)
             storage.mark_sent(listing, 123)
             self.assertEqual(storage.pending(10), [])
+            storage.close()
+
+    def test_used_comparables_exclude_current_duplicate_missing_part_old_and_other_model(self) -> None:
+        def bike(external_id: str, price: int | None, title: str = "Trek Marlin 7 Gen 3 29 2025", url: str = "") -> Listing:
+            return Listing(
+                source="bazos",
+                external_id=external_id,
+                title=title,
+                description="complete bike",
+                url=url or f"https://example.test/{external_id}",
+                profile="test",
+                price_czk=price,
+                price_amount=price,
+                price_status="numeric" if price else "missing",
+            )
+
+        with TemporaryDirectory() as directory:
+            storage = Storage(str(Path(directory) / "state.sqlite3"))
+            current = bike("current", 10000)
+            valid = bike("valid", 14000)
+            duplicate = bike("duplicate", 15000, url=valid.url)
+            missing = bike("missing", None)
+            part = bike("part", 5000, title="Trek Marlin 7 frame only")
+            other = bike("other", 16000, title="Trek X Caliber 9 29 2025")
+            old = bike("old", 13000)
+            storage.register([current, valid, duplicate, missing, part, other, old])
+            storage.connection.execute(
+                "UPDATE listings SET first_seen_at = ?, last_seen_at = ? WHERE external_id = 'old'",
+                (
+                    (datetime.now(UTC) - timedelta(days=31)).isoformat(),
+                    (datetime.now(UTC) - timedelta(days=31)).isoformat(),
+                ),
+            )
+            storage.connection.commit()
+            result = storage.find_used_comparables(current, max_age_days=30)
+            self.assertEqual(result.count, 1)
+            self.assertEqual(result.confidence, "low")
+            self.assertEqual(result.items[0].external_id, "valid")
+            storage.close()
+
+    def test_three_used_comparables_have_separate_median(self) -> None:
+        with TemporaryDirectory() as directory:
+            storage = Storage(str(Path(directory) / "state.sqlite3"))
+            items = [
+                Listing(
+                    source="bazos",
+                    external_id=str(index),
+                    title="Trek Marlin 7 Gen 3 29 2025",
+                    description="complete bike",
+                    url=f"https://example.test/{index}",
+                    profile="test",
+                    price_czk=price,
+                    price_amount=price,
+                    price_status="numeric",
+                )
+                for index, price in enumerate((10000, 12000, 14000, 16000))
+            ]
+            storage.register(items)
+            result = storage.find_used_comparables(items[0], max_age_days=30)
+            self.assertEqual(result.count, 3)
+            self.assertEqual(result.median_price_czk, 14000)
+            self.assertEqual(result.confidence, "medium")
             storage.close()
 
     def test_valuation_cache_roundtrip(self) -> None:

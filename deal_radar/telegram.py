@@ -7,13 +7,29 @@ from datetime import datetime
 from typing import Any
 
 from deal_radar.http import HttpError, post_form
-from deal_radar.models import Listing, Valuation
+from deal_radar.models import Listing, ListingAnalysis, Valuation
 
 
 SOURCE_LABELS = {"bazos": "Bazoš", "cyklobazar": "Cyklobazar"}
 SOURCE_CALLBACK_CODES = {"bazos": "b", "cyklobazar": "c"}
 CALLBACK_CODE_SOURCES = {code: source for source, code in SOURCE_CALLBACK_CODES.items()}
 LOGGER = logging.getLogger(__name__)
+DIAGNOSTIC_HEADER = "🧪 <b>Проверка Cyklobazar</b>\nЭтап 1.1\n\n"
+STAGE_1_2_DIAGNOSTIC_HEADER = "🧪 <b>Проверка DealRadar — этап 1.2</b>\n\n"
+PRIORITY_LABELS = {
+    "urgent_candidate": "🔥 Высокий приоритет",
+    "interesting_candidate": "✅ Потенциально интересно",
+    "manual_review": "🟡 Требует проверки",
+    "low_priority": "⚪ Низкий приоритет",
+    "excluded": "⛔ Исключено",
+}
+CONFIDENCE_LABELS = {
+    "high": "высокая",
+    "medium": "средняя",
+    "low": "низкая",
+    "insufficient": "недостаточная",
+    "none": "недостаточная",
+}
 
 
 def format_czk(value: int | None) -> str:
@@ -40,14 +56,6 @@ def format_seller_price(listing: Listing) -> str:
     return format_czk(listing.price_czk)
 
 
-def price_origin_label(value: str) -> str:
-    return {
-        "list_page": "list page",
-        "detail_page": "detail page",
-        "not_found": "not found",
-    }.get(value, "not found")
-
-
 def _listing_keyboard(listing: Listing, *, classifications: bool = True) -> dict[str, Any]:
     rows: list[list[dict[str, str]]] = []
     if classifications:
@@ -69,6 +77,90 @@ def _listing_keyboard(listing: Listing, *, classifications: bool = True) -> dict
     return {"inline_keyboard": rows}
 
 
+def _analysis_card_text(
+    listing: Listing,
+    analysis: ListingAnalysis,
+    *,
+    diagnostic: bool = False,
+) -> str:
+    identity = analysis.identity
+    valuation = analysis.valuation
+    used = analysis.used_comparables
+    priority = PRIORITY_LABELS.get(analysis.priority_class, analysis.priority_class)
+    marketplace = SOURCE_LABELS.get(listing.source, listing.source)
+    lines = []
+    if diagnostic:
+        lines.append(STAGE_1_2_DIAGNOSTIC_HEADER.rstrip())
+    lines.extend(
+        [
+            f"<b>{priority} — {analysis.preliminary_priority_score}/100</b>",
+            f"🚲 {html.escape(marketplace)} · <b>{html.escape(listing.title[:180])}</b>",
+            f"💰 Цена продавца: <b>{format_seller_price(listing)}</b>",
+        ]
+    )
+    if listing.location:
+        lines.append(f"📍 {html.escape(listing.location[:100])}")
+    if listing.published_at:
+        lines.append(f"🕒 {listing.published_at.astimezone().strftime('%d.%m %H:%M')}")
+    if identity:
+        recognized = " ".join(part for part in (identity.brand, identity.model) if part)
+        lines.append(f"🔎 Модель: {html.escape(recognized or 'не подтверждена')}")
+
+    if valuation and valuation.median_price_czk is not None:
+        lines.append("")
+        lines.append(f"🆕 Цена нового: <b>около {format_czk(valuation.median_price_czk)}</b>")
+        lines.append(
+            f"Магазинных источников: {valuation.independent_source_count} · "
+            f"уверенность: {CONFIDENCE_LABELS.get(valuation.new_price_confidence, valuation.new_price_confidence)}"
+        )
+        if valuation.discount_percent is not None:
+            sign = "−" if valuation.discount_percent >= 0 else "+"
+            lines.append(f"Разница относительно цены нового велосипеда: около {sign}{abs(valuation.discount_percent)}%")
+        try:
+            checked = datetime.fromisoformat(valuation.checked_at).astimezone().strftime("%d.%m.%Y")
+            lines.append(f"Цена обновлена: {checked}" + (" · кэш" if analysis.cache_used else ""))
+        except (TypeError, ValueError):
+            pass
+        if valuation.comparables:
+            links = []
+            for offer in valuation.comparables[:3]:
+                links.append(
+                    f'<a href="{html.escape(offer.url, quote=True)}">{html.escape(offer.seller[:45])}</a>'
+                )
+            lines.append("Источники: " + " · ".join(links))
+    else:
+        lines.extend(["", "🆕 Цена нового: не найдена или совпадение не подтверждено."])
+
+    if used and used.count:
+        lines.extend(
+            [
+                "",
+                "<b>Похожие активные б/у объявления</b>",
+                f"{format_czk(used.minimum_price_czk)}–{format_czk(used.maximum_price_czk)} · найдено: {used.count}",
+                "Это запрашиваемые цены продавцов, а не подтверждённые цены продажи.",
+            ]
+        )
+        if used.items:
+            used_links = [
+                f'<a href="{html.escape(item.url, quote=True)}">{html.escape(item.title[:45])}</a>'
+                for item in used.items[:2]
+            ]
+            lines.append("Объявления: " + " · ".join(used_links))
+    if analysis.reasons:
+        lines.extend(["", "<b>Почему выбран приоритет:</b>"])
+        lines.extend(f"• {html.escape(reason)}" for reason in analysis.reasons[:3])
+    if analysis.risks:
+        lines.extend(["", "<b>Риски:</b>"])
+        lines.extend(f"• {html.escape(risk)}" for risk in analysis.risks[:3])
+    lines.extend(
+        [
+            "",
+            f'<a href="{html.escape(listing.url, quote=True)}">Открыть оригинальное объявление</a>',
+        ]
+    )
+    return "\n".join(lines)
+
+
 class TelegramClient:
     def __init__(self, token: str, chat_id: str = "", timeout: int = 30) -> None:
         self.token = token
@@ -81,7 +173,10 @@ class TelegramClient:
         return f"https://api.telegram.org/bot{self.token}/{method}"
 
     def _call(self, method: str, fields: dict[str, Any]) -> dict[str, Any]:
-        return post_form(self._url(method), fields, timeout=self.timeout)["result"]
+        try:
+            return post_form(self._url(method), fields, timeout=self.timeout)["result"]
+        except HttpError:
+            raise HttpError(f"Telegram API method {method} failed") from None
 
     def send_text(self, text: str, reply_to_message_id: int | None = None) -> int:
         if not self.chat_id:
@@ -101,9 +196,18 @@ class TelegramClient:
         listing: Listing,
         retail_enabled: bool,
         diagnostic_header: str = "",
+        analysis: ListingAnalysis | None = None,
     ) -> int:
         if not self.chat_id:
             raise ValueError("TELEGRAM_CHAT_ID is not configured")
+        if analysis is not None:
+            text = _analysis_card_text(
+                listing,
+                analysis,
+                diagnostic=diagnostic_header == "stage_1_2",
+            )
+        else:
+            text = ""
         title = html.escape(listing.title[:220])
         location = html.escape(listing.location or "локация не распознана")
         published = ""
@@ -113,22 +217,22 @@ class TelegramClient:
         ai_line = "🔎 Ищу цены нового велосипеда…" if retail_enabled else "🔎 Поиск новой цены выключен"
         price_line = (
             f"💰 Цена продавца: {format_seller_price(listing)}\n"
-            f"🧾 Источник цены: {price_origin_label(listing.price_origin)}\n"
             if listing.source == "cyklobazar"
             else f"💰 {format_czk(listing.price_czk)}\n"
         )
-        prefix = f"🧪 <b>{html.escape(diagnostic_header)}</b>\n\n" if diagnostic_header else ""
-        text = (
-            f"{prefix}"
-            f"🚲 <b>Новое на {html.escape(marketplace)}</b>\n\n"
-            f"<b>{title}</b>\n"
-            f"{price_line}"
-            f"📍 {location}\n"
-            + (f"🕒 {published}\n" if published else "")
-            + f"🎯 {html.escape(listing.profile)}\n\n"
-            f"{ai_line}\n"
-            f"<a href=\"{html.escape(listing.url, quote=True)}\">Открыть объявление</a>"
-        )
+        prefix = DIAGNOSTIC_HEADER if diagnostic_header else ""
+        if analysis is None:
+            text = (
+                f"{prefix}"
+                f"🚲 <b>Новое на {html.escape(marketplace)}</b>\n\n"
+                f"<b>{title}</b>\n"
+                f"{price_line}"
+                f"📍 {location}\n"
+                + (f"🕒 {published}\n" if published else "")
+                + f"🎯 {html.escape(listing.profile)}\n\n"
+                f"{ai_line}\n"
+                f"<a href=\"{html.escape(listing.url, quote=True)}\">Открыть объявление</a>"
+            )
         keyboard = _listing_keyboard(listing)
         common: dict[str, Any] = {
             "chat_id": self.chat_id,
@@ -154,12 +258,6 @@ class TelegramClient:
         reply_to_message_id: int,
         max_sources: int = 5,
     ) -> int:
-        confidence_labels = {
-            "high": "высокая",
-            "medium": "средняя",
-            "low": "низкая",
-            "none": "нет надежного совпадения",
-        }
         try:
             checked = datetime.fromisoformat(valuation.checked_at).astimezone().strftime("%d.%m.%Y")
         except (TypeError, ValueError):
@@ -171,7 +269,7 @@ class TelegramClient:
             lines.extend(
                 [
                     f"Цена объявления: <b>{format_czk(listing.price_czk)}</b>",
-                    f"Медианная цена нового: <b>{format_czk(valuation.median_price_czk)}</b>",
+                    f"Ориентировочная цена нового: <b>{format_czk(valuation.median_price_czk)}</b>",
                 ]
             )
             if valuation.discount_percent is not None:
@@ -182,20 +280,21 @@ class TelegramClient:
                 lines.append(f"Разница: <b>{difference}</b>")
             lines.extend(
                 [
-                    f"Найдено предложений: {valuation.source_count}",
-                    f"Уверенность: {confidence_labels.get(valuation.confidence, valuation.confidence)}",
+                    f"Независимых источников: {valuation.independent_source_count or valuation.source_count}",
+                    f"Уверенность: {CONFIDENCE_LABELS.get(valuation.new_price_confidence if valuation.new_price_confidence != 'insufficient' else valuation.confidence, valuation.confidence)}",
                     f"Проверено: {checked}" + (" · кэш" if valuation.status == "cached" else ""),
                 ]
             )
         else:
             status_messages = {
                 "ambiguous_model": "Не удалось точно определить модель велосипеда.",
-                "model_discontinued": "Точная модель, вероятно, снята с продажи; активных предложений недостаточно.",
+                "offers_not_found": "Модель определена, но магазинные предложения не найдены.",
+                "no_matching_offers": "Найденные товары не прошли проверку точного совпадения.",
                 "source_error": "Источники цен временно недоступны.",
                 "codex_unavailable": "Неоднозначные совпадения требуют проверки, но Codex сейчас недоступен.",
                 "timeout": "Поиск цены превысил допустимое время.",
             }
-            lines.append(status_messages.get(valuation.status, "Не удалось найти минимум 3 точных предложения."))
+            lines.append(status_messages.get(valuation.status, "Подтверждённая цена нового велосипеда не найдена."))
             lines.append(f"Найдено точных совпадений: {valuation.source_count}")
             lines.append("Результат не используется для оценки выгоды.")
             lines.append(f"Проверено: {checked}")

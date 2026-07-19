@@ -95,7 +95,8 @@ TRIM_WORDS = {
 COMPONENT_WORDS = {"deore", "fox", "rockshox", "shimano", "sram", "suntour", "xt", "xtr"}
 ACCESSORY_WORDS = {
     "baterie", "battery", "charger", "fork", "frame only", "helmet", "nabijecka", "plášť", "plast",
-    "pneumatika", "ram kola", "sedlo", "vidlice",
+    "pneumatika", "ram kola", "sedlo", "vidlice", "bearing", "bearings", "headset", "lozisko",
+    "lozisek",
 }
 USED_WORDS = {"bazar", "pouzite", "pouzity", "refurbished", "repasovane", "repasovany", "used"}
 UNAVAILABLE_WORDS = {"neni skladem", "out of stock", "unavailable", "vyprodano"}
@@ -184,7 +185,7 @@ def identify_bike(title: str, description: str = "") -> BikeIdentity:
     if any(word in normalized_all for word in ("elektrokolo", "e bike", " ebike", "electric bike", "motor bosch")):
         electric: bool | None = True
     else:
-        electric = None
+        electric = False if brand and model else None
 
     audience = ""
     if any(word in normalized_all for word in ("detske", "detsky", "divci", "junior", "kids")):

@@ -8,7 +8,7 @@ import unittest
 
 from deal_radar.config import AppConfig, RetailConfig, SearchProfile, TelegramConfig
 from deal_radar.http import HttpError
-from deal_radar.models import Listing, RetailOffer, Valuation
+from deal_radar.models import BikeIdentity, Listing, ListingAnalysis, RetailOffer, UsedComparables, Valuation
 from deal_radar.service import DealRadarService
 from deal_radar.telegram import TelegramClient, format_seller_price
 
@@ -70,7 +70,7 @@ class TelegramValuationTest(unittest.TestCase):
         )
         telegram = CaptureTelegram()
         telegram.send_valuation(self.listing, valuation, 1, max_sources=3)
-        self.assertIn("Медианная цена нового", telegram.last_text)
+        self.assertIn("Ориентировочная цена нового", telegram.last_text)
         self.assertIn("дешевле на 35%", telegram.last_text)
         self.assertEqual(telegram.last_text.count("https://"), 3)
 
@@ -83,11 +83,75 @@ class TelegramValuationTest(unittest.TestCase):
         )
         telegram = CaptureTelegram()
         telegram.send_valuation(self.listing, valuation, 1)
-        self.assertIn("минимум 3 точных", telegram.last_text)
+        self.assertIn("Подтверждённая цена", telegram.last_text)
         self.assertIn("не используется", telegram.last_text)
 
 
 class TelegramFeedbackTest(unittest.TestCase):
+    def test_stage_1_2_card_contains_priority_sources_used_warning_and_old_buttons(self) -> None:
+        listing = Listing(
+            source="cyklobazar",
+            external_id="stage12",
+            title="Trek Marlin 7",
+            description="",
+            url="https://www.cyklobazar.cz/inzerat/stage12/trek-marlin",
+            profile="Praha",
+            price_czk=14900,
+            price_amount=14900,
+            price_status="numeric",
+        )
+        offer = RetailOffer("Shop A", "Trek Marlin 7", 23000, "https://shop.example/trek")
+        valuation = Valuation(
+            identified_product="Trek Marlin 7",
+            confidence="low",
+            status="success",
+            comparables=[offer],
+            median_price_czk=23000,
+            source_count=1,
+            independent_source_count=1,
+            offer_count=1,
+            new_price_confidence="low",
+            discount_percent=35,
+        )
+        analysis = ListingAnalysis(
+            72,
+            "interesting_candidate",
+            reasons=["Модель распознана."],
+            risks=["Цена нового велосипеда основана на одном источнике."],
+            identity=BikeIdentity(brand="Trek", model="Marlin 7"),
+            valuation=valuation,
+            used_comparables=UsedComparables(
+                count=3,
+                minimum_price_czk=16000,
+                maximum_price_czk=19000,
+                median_price_czk=17000,
+                confidence="medium",
+            ),
+        )
+        telegram = ApiTelegram()
+        telegram.send_listing(
+            listing,
+            retail_enabled=False,
+            diagnostic_header="stage_1_2",
+            analysis=analysis,
+        )
+        method, fields = telegram.calls[0]
+        self.assertEqual(method, "sendMessage")
+        self.assertIn("Проверка DealRadar — этап 1.2", fields["text"])
+        self.assertIn("Потенциально интересно — 72/100", fields["text"])
+        self.assertIn("Магазинных источников: 1", fields["text"])
+        self.assertIn("Похожие активные б/у объявления", fields["text"])
+        self.assertIn("не подтверждённые цены продажи", fields["text"])
+        self.assertIn("https://shop.example/trek", fields["text"])
+        keyboard = json.loads(fields["reply_markup"])
+        callbacks = [
+            button["callback_data"]
+            for row in keyboard["inline_keyboard"]
+            for button in row
+            if "callback_data" in button
+        ]
+        self.assertIn("fb:i:c:stage12", callbacks)
+
     def test_listing_buttons_carry_marketplace_source(self) -> None:
         listing = Listing(
             source="cyklobazar",
@@ -112,9 +176,9 @@ class TelegramFeedbackTest(unittest.TestCase):
         method, fields = telegram.calls[0]
         self.assertEqual(method, "sendMessage")
         self.assertIn("Новое на Cyklobazar", fields["text"])
-        self.assertIn("Проверка Cyklobazar — этап 1.1", fields["text"])
+        self.assertIn("🧪 <b>Проверка Cyklobazar</b>\nЭтап 1.1", fields["text"])
         self.assertIn("Цена продавца: 9 990 Kč", fields["text"])
-        self.assertIn("Источник цены: list page", fields["text"])
+        self.assertNotIn("Источник цены", fields["text"])
         keyboard = json.loads(fields["reply_markup"])
         callbacks = [
             button["callback_data"]
