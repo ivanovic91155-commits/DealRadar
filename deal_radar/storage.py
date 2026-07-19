@@ -55,6 +55,24 @@ class Storage:
             );
             """
         )
+        feedback_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(feedback)").fetchall()
+        }
+        for name, column_type in (
+            ("callback_query_id", "TEXT"),
+            ("telegram_message_id", "INTEGER"),
+            ("telegram_chat_id", "TEXT"),
+        ):
+            if name not in feedback_columns:
+                self.connection.execute(f"ALTER TABLE feedback ADD COLUMN {name} {column_type}")
+        self.connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS feedback_callback_query_id_uq
+            ON feedback(callback_query_id)
+            WHERE callback_query_id IS NOT NULL
+            """
+        )
         self.connection.commit()
 
     def is_empty(self) -> bool:
@@ -81,7 +99,26 @@ class Storage:
                     ),
                 )
                 inserted += cursor.rowcount
+                if cursor.rowcount == 0:
+                    self.connection.execute(
+                        """
+                        UPDATE listings SET data_json = ?
+                        WHERE source = ? AND external_id = ?
+                        """,
+                        (
+                            json.dumps(listing.to_dict(), ensure_ascii=False),
+                            listing.source,
+                            listing.external_id,
+                        ),
+                    )
         return inserted
+
+    def get_listing(self, source: str, external_id: str) -> Listing | None:
+        row = self.connection.execute(
+            "SELECT data_json FROM listings WHERE source = ? AND external_id = ?",
+            (source, external_id),
+        ).fetchone()
+        return Listing.from_dict(json.loads(row["data_json"])) if row else None
 
     def pending(self, limit: int) -> list[Listing]:
         rows = self.connection.execute(
@@ -105,15 +142,36 @@ class Storage:
                 (_now(), message_id, listing.source, listing.external_id),
             )
 
-    def record_feedback(self, source: str, external_id: str, label: str, user: str = "") -> None:
+    def record_feedback(
+        self,
+        source: str,
+        external_id: str,
+        label: str,
+        user: str = "",
+        callback_query_id: str = "",
+        telegram_message_id: int | None = None,
+        telegram_chat_id: str = "",
+    ) -> bool:
         with self.connection:
-            self.connection.execute(
+            cursor = self.connection.execute(
                 """
-                INSERT INTO feedback (source, external_id, label, telegram_user, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO feedback
+                (source, external_id, label, telegram_user, created_at,
+                 callback_query_id, telegram_message_id, telegram_chat_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (source, external_id, label, user, _now()),
+                (
+                    source,
+                    external_id,
+                    label,
+                    user,
+                    _now(),
+                    callback_query_id or None,
+                    telegram_message_id,
+                    telegram_chat_id or None,
+                ),
             )
+        return cursor.rowcount > 0
 
     def get_metadata(self, key: str, default: str = "") -> str:
         row = self.connection.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()

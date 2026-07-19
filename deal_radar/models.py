@@ -17,6 +17,11 @@ class Listing:
     location: str | None = None
     published_at: datetime | None = None
     image_url: str | None = None
+    price_amount: int | None = None
+    currency: str = "CZK"
+    raw_price_text: str = ""
+    price_status: str = ""
+    price_origin: str = ""
 
     @property
     def key(self) -> str:

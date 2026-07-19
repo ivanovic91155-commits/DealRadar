@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
+from deal_radar.config import AppConfig, RetailConfig, SearchProfile, TelegramConfig
+from deal_radar.http import HttpError
 from deal_radar.models import Listing, RetailOffer, Valuation
-from deal_radar.telegram import TelegramClient
+from deal_radar.service import DealRadarService
+from deal_radar.telegram import TelegramClient, format_seller_price
 
 
 class CaptureTelegram(TelegramClient):
@@ -19,13 +24,16 @@ class CaptureTelegram(TelegramClient):
 
 
 class ApiTelegram(TelegramClient):
-    def __init__(self, updates=None) -> None:
+    def __init__(self, updates=None, fail_methods=None) -> None:
         super().__init__("test", "1")
         self.updates = updates or []
         self.calls = []
+        self.fail_methods = set(fail_methods or [])
 
     def _call(self, method, fields):
         self.calls.append((method, fields))
+        if method in self.fail_methods:
+            raise HttpError(f"failed {method}")
         if method == "getUpdates":
             return self.updates
         if method in {"sendMessage", "sendPhoto"}:
@@ -89,17 +97,48 @@ class TelegramFeedbackTest(unittest.TestCase):
             url="https://www.cyklobazar.cz/inzerat/0dbED7vqmwQ60/rock-machine",
             profile="Praha",
             price_czk=9990,
+            price_amount=9990,
+            price_status="numeric",
+            price_origin="list_page",
         )
         telegram = ApiTelegram()
 
-        telegram.send_listing(listing, retail_enabled=False)
+        telegram.send_listing(
+            listing,
+            retail_enabled=False,
+            diagnostic_header="Проверка Cyklobazar — этап 1.1",
+        )
 
         method, fields = telegram.calls[0]
         self.assertEqual(method, "sendMessage")
         self.assertIn("Новое на Cyklobazar", fields["text"])
+        self.assertIn("Проверка Cyklobazar — этап 1.1", fields["text"])
+        self.assertIn("Цена продавца: 9 990 Kč", fields["text"])
+        self.assertIn("Источник цены: list page", fields["text"])
         keyboard = json.loads(fields["reply_markup"])
-        callbacks = [button["callback_data"] for row in keyboard["inline_keyboard"] for button in row]
+        callbacks = [
+            button["callback_data"]
+            for row in keyboard["inline_keyboard"]
+            for button in row
+            if "callback_data" in button
+        ]
         self.assertIn("fb:i:c:0dbED7vqmwQ60", callbacks)
+        self.assertEqual(keyboard["inline_keyboard"][-1][0]["url"], listing.url)
+
+    def test_formats_non_numeric_seller_price_statuses_without_zero(self) -> None:
+        listing = self._listing()
+        for status, expected in (
+            ("negotiable", "договорная"),
+            ("free", "бесплатно"),
+            ("in_description", "указана в описании"),
+            ("missing", "не указана"),
+            ("parse_error", "не удалось распознать"),
+        ):
+            with self.subTest(status=status):
+                listing.price_status = status
+                listing.price_czk = None
+                listing.price_amount = None
+                self.assertEqual(format_seller_price(listing), expected)
 
     def test_feedback_supports_new_sources_and_old_bazos_buttons(self) -> None:
         updates = [
@@ -130,6 +169,145 @@ class TelegramFeedbackTest(unittest.TestCase):
         self.assertEqual(feedback[1]["source"], "bazos")
         self.assertEqual(feedback[1]["label"], "skip")
         self.assertEqual([method for method, _ in telegram.calls].count("answerCallbackQuery"), 2)
+
+    @staticmethod
+    def _listing() -> Listing:
+        return Listing(
+            source="cyklobazar",
+            external_id="0dbED7vqmwQ60",
+            title="Rock Machine 29 XL",
+            description="",
+            url="https://www.cyklobazar.cz/inzerat/0dbED7vqmwQ60/rock-machine",
+            profile="Praha",
+            price_czk=9990,
+            price_amount=9990,
+            price_status="numeric",
+            price_origin="list_page",
+        )
+
+    @staticmethod
+    def _update(data: str, query_id: str = "q1", *, photo: bool = False, update_id: int = 10):
+        message = {
+            "message_id": 77,
+            "chat": {"id": 1},
+            "reply_markup": {"inline_keyboard": [[{"text": "Open", "url": "https://example.test"}]]},
+        }
+        if photo:
+            message.update({"caption": "Original caption", "photo": [{"file_id": "photo"}]})
+        else:
+            message["text"] = "Original text"
+        return {
+            "update_id": update_id,
+            "callback_query": {"id": query_id, "data": data, "from": {"id": 42}, "message": message},
+        }
+
+    def _service(self, directory: str) -> DealRadarService:
+        return DealRadarService(
+            AppConfig(
+                database_path=str(Path(directory) / "state.sqlite3"),
+                profiles=[SearchProfile(name="test", rss_url="https://sport.bazos.cz/rss.php?hledat=kolo")],
+                telegram=TelegramConfig(bot_token="test", chat_id="1"),
+                retail=RetailConfig(enabled=False),
+            )
+        )
+
+    def test_interesting_is_saved_and_edits_text_removing_classification_buttons(self) -> None:
+        with TemporaryDirectory() as directory:
+            service = self._service(directory)
+            listing = self._listing()
+            service.storage.register([listing])
+            telegram = ApiTelegram([self._update("fb:i:c:0dbED7vqmwQ60")])
+            try:
+                self.assertEqual(service.collect_feedback(telegram), 1)
+                label = service.storage.connection.execute("SELECT label FROM feedback").fetchone()["label"]
+                self.assertEqual(label, "interesting")
+                methods = [method for method, _ in telegram.calls]
+                self.assertLess(methods.index("answerCallbackQuery"), methods.index("editMessageText"))
+                fields = next(fields for method, fields in telegram.calls if method == "editMessageText")
+                self.assertIn("⭐ Отмечено: интересно", fields["text"])
+                keyboard = json.loads(fields["reply_markup"])
+                self.assertTrue(keyboard["inline_keyboard"][0][0]["url"].startswith("https://"))
+                self.assertNotIn("callback_data", json.dumps(keyboard))
+            finally:
+                service.close()
+
+    def test_interesting_edits_photo_caption(self) -> None:
+        listing = self._listing()
+        telegram = ApiTelegram([self._update("fb:i:c:0dbED7vqmwQ60", photo=True)])
+        events, _ = telegram.get_feedback_updates(0)
+        telegram.apply_feedback_action(events[0], listing)
+        fields = next(fields for method, fields in telegram.calls if method == "editMessageCaption")
+        self.assertIn("⭐ Отмечено: интересно", fields["caption"])
+
+    def test_skip_and_too_expensive_are_saved_separately_and_delete(self) -> None:
+        for code, expected in (("n", "skip"), ("e", "too_expensive")):
+            with self.subTest(code=code), TemporaryDirectory() as directory:
+                service = self._service(directory)
+                listing = self._listing()
+                service.storage.register([listing])
+                telegram = ApiTelegram([self._update(f"fb:{code}:c:0dbED7vqmwQ60")])
+                try:
+                    service.collect_feedback(telegram)
+                    label = service.storage.connection.execute("SELECT label FROM feedback").fetchone()["label"]
+                    self.assertEqual(label, expected)
+                    self.assertIn("deleteMessage", [method for method, _ in telegram.calls])
+                finally:
+                    service.close()
+
+    def test_delete_error_falls_back_to_visual_marker(self) -> None:
+        listing = self._listing()
+        telegram = ApiTelegram(
+            [self._update("fb:e:c:0dbED7vqmwQ60")],
+            fail_methods={"deleteMessage"},
+        )
+        events, _ = telegram.get_feedback_updates(0)
+        telegram.apply_feedback_action(events[0], listing)
+        fields = next(fields for method, fields in telegram.calls if method == "editMessageText")
+        self.assertIn("💸 Мимо: дорого", fields["text"])
+
+    def test_repeated_callback_does_not_duplicate_feedback_or_delete(self) -> None:
+        with TemporaryDirectory() as directory:
+            service = self._service(directory)
+            service.storage.register([self._listing()])
+            update = self._update("fb:n:c:0dbED7vqmwQ60", query_id="same")
+            telegram = ApiTelegram([update])
+            try:
+                service.collect_feedback(telegram)
+                service.storage.set_metadata("telegram_update_offset", "0")
+                service.collect_feedback(telegram)
+                count = service.storage.connection.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+                self.assertEqual(count, 1)
+                self.assertEqual([m for m, _ in telegram.calls].count("deleteMessage"), 1)
+            finally:
+                service.close()
+
+    def test_unknown_label_is_ignored_and_following_callback_continues(self) -> None:
+        updates = [
+            self._update("fb:x:c:bad", query_id="bad", update_id=10),
+            self._update("fb:i:c:0dbED7vqmwQ60", query_id="good", update_id=11),
+        ]
+        telegram = ApiTelegram(updates)
+        events, next_offset = telegram.get_feedback_updates(0)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["label"], "interesting")
+        self.assertEqual(next_offset, 12)
+
+    def test_polling_continues_after_callback_api_error(self) -> None:
+        with TemporaryDirectory() as directory:
+            service = self._service(directory)
+            service.storage.register([self._listing()])
+            telegram = ApiTelegram(
+                [
+                    self._update("fb:n:c:0dbED7vqmwQ60", query_id="q1", update_id=10),
+                    self._update("fb:i:c:0dbED7vqmwQ60", query_id="q2", update_id=11),
+                ],
+                fail_methods={"deleteMessage"},
+            )
+            try:
+                service.collect_feedback(telegram)
+                self.assertEqual(service.storage.connection.execute("SELECT COUNT(*) FROM feedback").fetchone()[0], 2)
+            finally:
+                service.close()
 
 
 if __name__ == "__main__":

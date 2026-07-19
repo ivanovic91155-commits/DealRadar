@@ -33,13 +33,17 @@ def _deduplicate(listings: Iterable[Listing]) -> list[Listing]:
 class DealRadarService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
+        self.storage = Storage(config.database_path)
         self.sources = [BazosSource(profile, config.request_timeout_seconds) for profile in config.profiles]
         self.sources.extend(
-            CyklobazarSource(profile, config.request_timeout_seconds)
+            CyklobazarSource(
+                profile,
+                config.request_timeout_seconds,
+                existing_listing=lambda external_id: self.storage.get_listing("cyklobazar", external_id),
+            )
             for profile in config.cyklobazar_profiles
             if profile.enabled
         )
-        self.storage = Storage(config.database_path)
 
     def close(self) -> None:
         self.storage.close()
@@ -107,9 +111,31 @@ class DealRadarService:
             return 0
         telegram = telegram or self._telegram()
         offset = int(self.storage.get_metadata("telegram_update_offset", "0") or 0)
-        feedback, next_offset = telegram.poll_feedback(offset)
-        for item in feedback:
-            self.storage.record_feedback(**item)
+        if not hasattr(telegram, "get_feedback_updates"):
+            feedback, next_offset = telegram.poll_feedback(offset)
+            for item in feedback:
+                self.storage.record_feedback(**item)
+        else:
+            feedback, next_offset = telegram.get_feedback_updates(offset)
+            for item in feedback:
+                persisted = self.storage.record_feedback(
+                    source=item["source"],
+                    external_id=item["external_id"],
+                    label=item["label"],
+                    user=item.get("user", ""),
+                    callback_query_id=item.get("callback_query_id", ""),
+                    telegram_message_id=item.get("telegram_message_id"),
+                    telegram_chat_id=item.get("telegram_chat_id", ""),
+                )
+                listing = self.storage.get_listing(item["source"], item["external_id"])
+                try:
+                    telegram.apply_feedback_action(item, listing, repeated=not persisted)
+                except Exception:
+                    LOGGER.exception(
+                        "Telegram feedback action failed for %s:%s",
+                        item["source"],
+                        item["external_id"],
+                    )
         if next_offset != offset:
             self.storage.set_metadata("telegram_update_offset", str(next_offset))
         return len(feedback)
