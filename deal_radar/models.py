@@ -52,6 +52,13 @@ class BikeIdentity:
     bike_type: str = ""
     electric: bool | None = None
     audience: str = ""
+    model_family: str = ""
+    suspension_type: str = ""
+    frame_material: str = ""
+    fork_class: str = ""
+    drivetrain_class: str = ""
+    brake_class: str = ""
+    travel_mm: int | None = None
     confidence: float = 0.0
 
     @property
@@ -193,6 +200,134 @@ class UsedComparables:
 
 
 @dataclass(slots=True)
+class MarketComparable:
+    source: str
+    source_listing_id: str
+    url: str
+    country: str
+    title: str
+    description: str = ""
+    price_original: float | None = None
+    currency: str = "CZK"
+    price_czk: int | None = None
+    brand: str = ""
+    model: str = ""
+    model_family: str = ""
+    generation: str = ""
+    trim: str = ""
+    year: int | None = None
+    frame_size: str = ""
+    wheel_size: str = ""
+    bike_type: str = ""
+    is_ebike: bool | None = None
+    suspension_type: str = ""
+    frame_material: str = ""
+    fork_class: str = ""
+    drivetrain_class: str = ""
+    brake_class: str = ""
+    travel_mm: int | None = None
+    match_type: str = "unmatched"
+    match_score: float = 0.0
+    listing_fingerprint: str = ""
+    image_fingerprint: str = ""
+    duplicate_group_id: str = ""
+    published_at: str = ""
+    first_seen_at: str = ""
+    last_seen_at: str = ""
+    is_active: bool = True
+    image_url: str = ""
+    seller: str = ""
+    location: str = ""
+    weight: float = 0.0
+    exclusion_reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MarketComparable":
+        allowed = {item.name for item in fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in allowed})
+
+
+@dataclass(slots=True)
+class MarketValuation:
+    listing_source: str
+    listing_external_id: str
+    market_price_czk: int | None = None
+    quick_sale_price_czk: int | None = None
+    price_low_czk: int | None = None
+    price_high_czk: int | None = None
+    confidence: str = "low"
+    valuation_method: str = "none"
+    status: str = "insufficient_comparables"
+    comparables_total: int = 0
+    comparables_unique: int = 0
+    exact_comparables: int = 0
+    close_comparables: int = 0
+    family_comparables: int = 0
+    component_comparables: int = 0
+    cz_comparables: int = 0
+    foreign_comparables: int = 0
+    countries_used: list[str] = field(default_factory=list)
+    sources_used: list[str] = field(default_factory=list)
+    country_counts: dict[str, int] = field(default_factory=dict)
+    country_medians_czk: dict[str, int] = field(default_factory=dict)
+    country_adjustments: dict[str, float] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    comparables: list[MarketComparable] = field(default_factory=list)
+    rejected_comparables: list[MarketComparable] = field(default_factory=list)
+    duplicates_removed: int = 0
+    source_copies_excluded: int = 0
+    markets_queried: list[str] = field(default_factory=list)
+    market_reasons: list[str] = field(default_factory=list)
+    exchange_rates_to_czk: dict[str, float] = field(default_factory=dict)
+    exchange_rate_source: str = ""
+    exchange_rate_date: str = ""
+    cache_used: bool = False
+    cache_hits: int = 0
+    cache_misses: int = 0
+    http_requests: dict[str, int] = field(default_factory=dict)
+    calculated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    expires_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MarketValuation":
+        copy = dict(data)
+        copy["comparables"] = [
+            MarketComparable.from_dict(item) for item in copy.get("comparables", [])
+        ]
+        copy["rejected_comparables"] = [
+            MarketComparable.from_dict(item) for item in copy.get("rejected_comparables", [])
+        ]
+        allowed = {item.name for item in fields(cls)}
+        return cls(**{key: value for key, value in copy.items() if key in allowed})
+
+    def as_used_comparables(self) -> UsedComparables:
+        priced = [item for item in self.comparables if item.price_czk]
+        return UsedComparables(
+            count=self.comparables_unique,
+            minimum_price_czk=self.price_low_czk,
+            maximum_price_czk=self.price_high_czk,
+            median_price_czk=self.market_price_czk,
+            items=[
+                UsedComparable(
+                    source=item.source,
+                    external_id=item.source_listing_id,
+                    title=item.title,
+                    url=item.url,
+                    price_czk=int(item.price_czk or 0),
+                )
+                for item in priced[:5]
+            ],
+            confidence=self.confidence if self.market_price_czk is not None else "insufficient",
+        )
+
+
+@dataclass(slots=True)
 class ListingAnalysis:
     preliminary_priority_score: int
     priority_class: str
@@ -207,6 +342,7 @@ class ListingAnalysis:
     notification_status: str = "awaiting_analysis"
     notification_reason: str = ""
     duplicate_alternatives: list[dict[str, str]] = field(default_factory=list)
+    market_valuation: MarketValuation | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -220,5 +356,7 @@ class ListingAnalysis:
             copy["valuation"] = Valuation.from_dict(copy["valuation"])
         if isinstance(copy.get("used_comparables"), dict):
             copy["used_comparables"] = UsedComparables.from_dict(copy["used_comparables"])
+        if isinstance(copy.get("market_valuation"), dict):
+            copy["market_valuation"] = MarketValuation.from_dict(copy["market_valuation"])
         allowed = {item.name for item in fields(cls)}
         return cls(**{key: value for key, value in copy.items() if key in allowed})

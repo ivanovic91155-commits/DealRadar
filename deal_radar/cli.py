@@ -28,6 +28,23 @@ def build_parser() -> argparse.ArgumentParser:
     price_check.add_argument("--title", required=True, help="Bicycle listing title")
     price_check.add_argument("--description", default="")
     price_check.add_argument("--price", type=int, default=None, help="Listing price in CZK")
+    market_check = subparsers.add_parser(
+        "market-price-check",
+        help="Run Market Price Engine v2 for one manual listing without Telegram",
+    )
+    market_check.add_argument("--title", required=True)
+    market_check.add_argument("--description", default="")
+    market_check.add_argument("--price", type=int, default=None)
+    market_check.add_argument("--write-cache", action="store_true")
+    market_check.add_argument("--force", action="store_true")
+    diagnostic = subparsers.add_parser(
+        "market-diagnostic",
+        help="Evaluate active listings safely; optionally send diagnostic Telegram cards",
+    )
+    diagnostic.add_argument("--limit", type=int, default=5)
+    diagnostic.add_argument("--send-telegram", action="store_true")
+    diagnostic.add_argument("--write-state", action="store_true")
+    diagnostic.add_argument("--force", action="store_true")
     return parser
 
 
@@ -83,6 +100,49 @@ def main(argv: list[str] | None = None) -> int:
                 price_czk=args.price,
             )
             print(json.dumps(finder.find(listing).to_dict(), ensure_ascii=False, indent=2))
+        elif args.command == "market-price-check":
+            finder = service._market_finder()
+            if finder is None:
+                raise RuntimeError("Market Price Engine is disabled in config")
+            listing = Listing(
+                source="manual",
+                external_id="market-price-check",
+                title=args.title,
+                description=args.description,
+                url="https://example.invalid/manual-market-price-check",
+                profile="manual",
+                price_czk=args.price,
+                price_amount=args.price,
+                price_status="numeric" if args.price else "missing",
+            )
+            result = finder.find(
+                listing,
+                read_only=not args.write_cache,
+                force=args.force,
+            )
+            print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        elif args.command == "market-diagnostic":
+            results = service.diagnose_market(
+                limit=args.limit,
+                send_telegram=args.send_telegram,
+                write_state=args.write_state,
+                force=args.force,
+            )
+            summary = [
+                {
+                    "listing": listing.key,
+                    "title": listing.title,
+                    "status": analysis.market_valuation.status if analysis.market_valuation else "missing",
+                    "market_price_czk": analysis.market_valuation.market_price_czk if analysis.market_valuation else None,
+                    "confidence": analysis.market_valuation.confidence if analysis.market_valuation else "none",
+                    "countries": analysis.market_valuation.countries_used if analysis.market_valuation else [],
+                    "cache_hits": analysis.market_valuation.cache_hits if analysis.market_valuation else 0,
+                    "cache_misses": analysis.market_valuation.cache_misses if analysis.market_valuation else 0,
+                    "http_requests": analysis.market_valuation.http_requests if analysis.market_valuation else {},
+                }
+                for listing, analysis in results
+            ]
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
     finally:
         service.close()
     return 0

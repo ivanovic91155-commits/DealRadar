@@ -7,8 +7,17 @@ from datetime import UTC, datetime
 
 from deal_radar.config import AppConfig
 from deal_radar.bike_identity import identify_listing
+from deal_radar.exchange_rates import ExchangeRateProvider
 from deal_radar.http import get_bytes
-from deal_radar.models import Listing, ListingAnalysis
+from deal_radar.market_pricing import MarketPriceEngine
+from deal_radar.market_sources import (
+    BazosCzechMarketSource,
+    BuycycleMarketSource,
+    KleinanzeigenMarketSource,
+    MarktplaatsMarketSource,
+    UsedMarketSource,
+)
+from deal_radar.models import Listing, ListingAnalysis, MarketValuation
 from deal_radar.price_sources import PriceSource, ZboziPriceSource
 from deal_radar.pricing import NewBikePriceService
 from deal_radar.pricing import valuation_cache_key
@@ -78,6 +87,57 @@ class DealRadarService:
             )
         return listings
 
+    def diagnose_market(
+        self,
+        *,
+        limit: int = 5,
+        send_telegram: bool = False,
+        write_state: bool = False,
+        force: bool = False,
+    ) -> list[tuple[Listing, ListingAnalysis]]:
+        finder = self._market_finder()
+        if finder is None:
+            raise RuntimeError("Market Price Engine is disabled")
+        telegram = self._telegram() if send_telegram else None
+        results: list[tuple[Listing, ListingAnalysis]] = []
+        for listing in self.storage.recent_active_listings(limit=max(limit * 4, 20)):
+            identity = identify_listing(listing)
+            if not identity.brand or not identity.model:
+                continue
+            new_valuation = self.storage.get_cached_valuation(valuation_cache_key(identity))
+            market = finder.find(
+                listing,
+                identity,
+                new_valuation=new_valuation,
+                read_only=not write_state,
+                force=force,
+            )
+            analysis = build_analysis(
+                listing,
+                self.config.priority,
+                identity=identity,
+                valuation=new_valuation,
+                used_comparables=market.as_used_comparables(),
+                cache_used=market.cache_used,
+            )
+            analysis.market_valuation = market
+            analysis.duplicate_alternatives = self.storage.duplicate_alternatives(listing)
+            if write_state:
+                self.storage.save_analysis(listing, analysis)
+            if telegram is not None:
+                telegram.send_listing(
+                    listing,
+                    retail_enabled=False,
+                    diagnostic_header="stage_2_1",
+                    analysis=analysis,
+                )
+            results.append((listing, analysis))
+            if len(results) >= limit:
+                break
+        if len(results) < limit:
+            raise RuntimeError(f"Only {len(results)} active identifiable listings available for {limit} diagnostics")
+        return results
+
     def _telegram(self) -> TelegramClient:
         return TelegramClient(
             self.config.telegram.bot_token,
@@ -101,6 +161,33 @@ class DealRadarService:
         if self.config.retail.codex_enabled:
             LOGGER.warning("DEAL_RADAR_CODEX_ENABLED is ignored in stage 1.2; runtime AI is disabled")
         return NewBikePriceService(self.config.retail, sources, resolver=None)
+
+    def _market_finder(self) -> MarketPriceEngine | None:
+        config = self.config.market_pricing
+        if not config.enabled:
+            return None
+        source_types = {
+            "bazos_cz": BazosCzechMarketSource,
+            "kleinanzeigen_de": KleinanzeigenMarketSource,
+            "marktplaats_nl": MarktplaatsMarketSource,
+            "buycycle_eu": BuycycleMarketSource,
+        }
+        sources: list[UsedMarketSource] = []
+        for name in config.sources:
+            source_type = source_types[name]
+            sources.append(
+                source_type(
+                    timeout=config.source_timeout_seconds,
+                    max_results=config.max_results_per_source,
+                )
+            )
+        exchange_rates = ExchangeRateProvider(
+            self.storage,
+            config.exchange_rate_url,
+            ttl_hours=config.cache_ttl_hours["exchange_rate"],
+            timeout=config.source_timeout_seconds,
+        )
+        return MarketPriceEngine(config, self.storage, exchange_rates, sources)
 
     def _duplicate_detail_description(self, listing: Listing) -> str:
         if listing.source != "cyklobazar":
@@ -181,8 +268,10 @@ class DealRadarService:
         telegram = telegram or self._telegram()
         feedback_count = self.collect_feedback(telegram)
         finder = self._retail_finder()
+        market_finder = self._market_finder()
         analyzed: dict[str, tuple[Listing, ListingAnalysis]] = {}
         cache_hits = 0
+        market_cache_hits = 0
         for listing in new_listings:
             identity = finder.identify(listing) if finder else identify_listing(listing)
             used = self.storage.find_used_comparables(
@@ -190,6 +279,7 @@ class DealRadarService:
                 max_age_days=self.config.priority.used_comparable_max_age_days,
             )
             valuation = None
+            market_valuation: MarketValuation | None = None
             cache_used = False
             if finder and identity.brand and identity.model:
                 cached = self.storage.get_cached_valuation(valuation_cache_key(identity))
@@ -197,14 +287,20 @@ class DealRadarService:
                     valuation = finder.as_cached(cached)
                     cache_used = True
                     cache_hits += 1
+            if market_finder and identity.brand and identity.model:
+                market_valuation = self.storage.get_cached_market_valuation(listing)
+                if market_valuation is not None:
+                    used = market_valuation.as_used_comparables()
+                    market_cache_hits += 1
             analysis = build_analysis(
                 listing,
                 self.config.priority,
                 identity=identity,
                 valuation=valuation,
                 used_comparables=used,
-                cache_used=cache_used,
+                cache_used=cache_used and (market_valuation is not None or market_finder is None),
             )
+            analysis.market_valuation = market_valuation
             analysis.duplicate_alternatives = self.storage.duplicate_alternatives(listing)
             if listing.key in suppress_keys:
                 analysis.notification_status = "not_selected"
@@ -215,7 +311,11 @@ class DealRadarService:
             self.storage.save_analysis(listing, analysis)
             analyzed[listing.key] = (listing, analysis)
 
-        lookup_budget = dynamic_lookup_budget(len(new_listings), self.config.priority) if finder else 0
+        lookup_budget = (
+            dynamic_lookup_budget(len(new_listings), self.config.priority)
+            if finder or market_finder
+            else 0
+        )
         lookup_pool = [
             value for key, value in analyzed.items()
             if key not in suppress_keys and key not in duplicate_suppressed_keys
@@ -223,8 +323,13 @@ class DealRadarService:
         lookups = select_lookup_candidates(lookup_pool, lookup_budget)
         lookup_count = 0
         consecutive_errors = 0
+        market_http_requests: dict[str, int] = {}
         for index, (listing, previous) in enumerate(lookups):
-            if consecutive_errors >= self.config.retail.max_consecutive_source_errors:
+            if (
+                finder
+                and market_finder is None
+                and consecutive_errors >= self.config.retail.max_consecutive_source_errors
+            ):
                 LOGGER.warning("Price lookups stopped after %d consecutive errors", consecutive_errors)
                 break
             if index and self.config.retail.lookup_delay_seconds > 0:
@@ -233,35 +338,58 @@ class DealRadarService:
             if identity is None:
                 continue
             lookup_count += 1
-            try:
-                valuation = finder.find(listing, identity)
-                self.storage.cache_valuation_hours(
-                    valuation_cache_key(identity),
-                    valuation,
-                    finder.cache_ttl_hours(valuation.status),
-                )
-                consecutive_errors = 0
-                analysis = build_analysis(
-                    listing,
-                    self.config.priority,
-                    identity=identity,
-                    valuation=valuation,
-                    used_comparables=previous.used_comparables,
-                    cache_used=False,
-                )
-                analysis.duplicate_alternatives = previous.duplicate_alternatives
-                analyzed[listing.key] = (listing, analysis)
-                self.storage.save_analysis(listing, analysis)
-            except Exception as exc:
-                consecutive_errors += 1
-                previous.risks.append(f"Поиск новой цены завершился ошибкой {type(exc).__name__}.")
-                previous.preliminary_priority_score = max(
-                    previous.preliminary_priority_score,
+            valuation = previous.valuation
+            if finder and (valuation is None or not previous.cache_used):
+                try:
+                    valuation = finder.find(listing, identity)
+                    self.storage.cache_valuation_hours(
+                        valuation_cache_key(identity),
+                        valuation,
+                        finder.cache_ttl_hours(valuation.status),
+                    )
+                    consecutive_errors = 0
+                except Exception as exc:
+                    consecutive_errors += 1
+                    previous.risks.append(f"Поиск новой цены завершился ошибкой {type(exc).__name__}.")
+                    LOGGER.exception("Retail valuation failed for %s; used-market search continues", listing.key)
+
+            market_valuation = previous.market_valuation
+            if market_finder and market_valuation is None:
+                try:
+                    market_valuation = market_finder.find(
+                        listing,
+                        identity,
+                        new_valuation=valuation,
+                    )
+                    for source, count in market_valuation.http_requests.items():
+                        market_http_requests[source] = market_http_requests.get(source, 0) + count
+                except Exception as exc:
+                    previous.risks.append(f"Рыночная оценка завершилась ошибкой {type(exc).__name__}.")
+                    LOGGER.exception("Market valuation failed for %s; listing remains eligible", listing.key)
+
+            used = (
+                market_valuation.as_used_comparables()
+                if market_valuation is not None
+                else previous.used_comparables
+            )
+            analysis = build_analysis(
+                listing,
+                self.config.priority,
+                identity=identity,
+                valuation=valuation,
+                used_comparables=used,
+                cache_used=False,
+            )
+            analysis.market_valuation = market_valuation
+            analysis.duplicate_alternatives = previous.duplicate_alternatives
+            if consecutive_errors and market_valuation is None:
+                analysis.preliminary_priority_score = max(
+                    analysis.preliminary_priority_score,
                     self.config.priority.manual_review_min_score,
                 )
-                previous.priority_class = "manual_review"
-                self.storage.save_analysis(listing, previous)
-                LOGGER.exception("Retail valuation failed for %s; listing remains eligible", listing.key)
+                analysis.priority_class = "manual_review"
+            analyzed[listing.key] = (listing, analysis)
+            self.storage.save_analysis(listing, analysis)
 
         now = datetime.now(UTC)
         notification_pool: list[tuple[Listing, ListingAnalysis, float]] = []
@@ -327,12 +455,15 @@ class DealRadarService:
         one_source = sum(bool(item.valuation and item.valuation.independent_source_count == 1) for item in final_analyses)
         two_sources = sum(bool(item.valuation and item.valuation.independent_source_count == 2) for item in final_analyses)
         three_plus = sum(bool(item.valuation and item.valuation.independent_source_count >= 3) for item in final_analyses)
+        market_values = [item.market_valuation for item in final_analyses if item.market_valuation]
         stats = {
             "fetched": len(listings),
             "new": inserted,
             "hard_excluded": sum(item.priority_class == "excluded" for item in final_analyses),
             "scored": len(final_analyses),
             "cache_hits": cache_hits,
+            "market_cache_hits": market_cache_hits + sum(item.cache_hits for item in market_values),
+            "market_cache_misses": sum(item.cache_misses for item in market_values),
             "price_lookups": lookup_count,
             "one_source": one_source,
             "two_sources": two_sources,
@@ -348,8 +479,17 @@ class DealRadarService:
             "feedback": feedback_count,
             "duplicate_groups": duplicate_stats["groups"],
             "confirmed_duplicate_suppressed": len(duplicate_suppressed_keys),
+            "market_evaluated": sum(item.market_price_czk is not None for item in market_values),
+            "market_high": sum(item.confidence == "high" for item in market_values),
+            "market_medium": sum(item.confidence == "medium" for item in market_values),
+            "market_low": sum(item.confidence == "low" for item in market_values),
+            "market_cz_only": sum(item.countries_used == ["CZ"] for item in market_values),
+            "market_foreign": sum(any(country != "CZ" for country in item.countries_used) for item in market_values),
+            "market_duplicates_removed": sum(item.duplicates_removed for item in market_values),
         }
-        LOGGER.info("Stage 1.2 cycle funnel: %s", stats)
+        for source, count in market_http_requests.items():
+            stats[f"market_http_{source}"] = count
+        LOGGER.info("Stage 2.1 cycle funnel: %s", stats)
         return stats
 
     def run_forever(self) -> None:

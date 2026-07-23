@@ -16,6 +16,7 @@ CALLBACK_CODE_SOURCES = {code: source for source, code in SOURCE_CALLBACK_CODES.
 LOGGER = logging.getLogger(__name__)
 DIAGNOSTIC_HEADER = "🧪 <b>Проверка Cyklobazar</b>\nЭтап 1.1\n\n"
 STAGE_1_2_DIAGNOSTIC_HEADER = "🧪 <b>Проверка DealRadar — этап 1.2</b>\n\n"
+STAGE_2_1_DIAGNOSTIC_HEADER = "🧪 <b>Проверка DealRadar — этап 2.1</b>\n\n"
 PRIORITY_LABELS = {
     "urgent_candidate": "🔥 Высокий приоритет",
     "interesting_candidate": "✅ Потенциально интересно",
@@ -81,16 +82,19 @@ def _analysis_card_text(
     listing: Listing,
     analysis: ListingAnalysis,
     *,
-    diagnostic: bool = False,
+    diagnostic_header: str = "",
 ) -> str:
     identity = analysis.identity
     valuation = analysis.valuation
+    market_valuation = analysis.market_valuation
     used = analysis.used_comparables
     priority = PRIORITY_LABELS.get(analysis.priority_class, analysis.priority_class)
     marketplace = SOURCE_LABELS.get(listing.source, listing.source)
     lines = []
-    if diagnostic:
+    if diagnostic_header == "stage_1_2":
         lines.append(STAGE_1_2_DIAGNOSTIC_HEADER.rstrip())
+    elif diagnostic_header == "stage_2_1":
+        lines.append(STAGE_2_1_DIAGNOSTIC_HEADER.rstrip())
     lines.extend(
         [
             f"<b>{priority} — {analysis.preliminary_priority_score}/100</b>",
@@ -110,6 +114,48 @@ def _analysis_card_text(
         url = html.escape(alternative.get("url", ""), quote=True)
         if url:
             lines.append(f'🔁 <a href="{url}">Также найдено на {html.escape(source)}</a>')
+
+    if market_valuation:
+        lines.extend(["", "<b>📊 Оценка рынка</b>"])
+        if market_valuation.market_price_czk is not None:
+            lines.extend(
+                [
+                    f"Ориентировочная цена: <b>{format_czk(market_valuation.market_price_czk)}</b>",
+                    f"Диапазон рынка: {format_czk(market_valuation.price_low_czk)}–{format_czk(market_valuation.price_high_czk)}",
+                    f"Цена быстрой продажи: <b>{format_czk(market_valuation.quick_sale_price_czk)}</b>",
+                    f"Уверенность: {CONFIDENCE_LABELS.get(market_valuation.confidence, market_valuation.confidence)}",
+                    "",
+                    "<b>Аналоги:</b>",
+                    f"• Чехия: {market_valuation.cz_comparables}",
+                    f"• Зарубежные: {market_valuation.foreign_comparables}",
+                    f"• Всего найдено: {market_valuation.comparables_total}",
+                    f"• После удаления дублей: {market_valuation.comparables_unique}",
+                    (
+                        "Типы: "
+                        f"точные {market_valuation.exact_comparables} · "
+                        f"близкие {market_valuation.close_comparables} · "
+                        f"семейство {market_valuation.family_comparables} · "
+                        f"класс {market_valuation.component_comparables}"
+                    ),
+                    "Это запрашиваемые цены продавцов, а не подтверждённые цены реальных продаж.",
+                ]
+            )
+            if market_valuation.status == "foreign_only_estimate":
+                countries = ", ".join(market_valuation.countries_used) or "зарубежному рынку"
+                lines.append(
+                    f"⚠️ В Чехии подходящие аналоги не найдены. Оценка построена по рынку {html.escape(countries)}."
+                )
+            if market_valuation.status == "depreciation_estimate":
+                lines.append(
+                    "⚠️ Used-аналоги не найдены. Цена приблизительно рассчитана от стоимости нового велосипеда."
+                )
+        else:
+            lines.append(
+                f"Рыночная цена не найдена · статус: {html.escape(market_valuation.status)}."
+            )
+        for warning in market_valuation.warnings[:2]:
+            if "зарубежному рынку" not in warning and "Used-аналоги" not in warning:
+                lines.append(f"⚠️ {html.escape(warning)}")
 
     if valuation and valuation.median_price_czk is not None:
         lines.append("")
@@ -136,7 +182,7 @@ def _analysis_card_text(
     else:
         lines.extend(["", "🆕 Цена нового: не найдена или совпадение не подтверждено."])
 
-    if used and used.count:
+    if used and used.count and market_valuation is None:
         lines.extend(
             [
                 "",
@@ -209,7 +255,7 @@ class TelegramClient:
             text = _analysis_card_text(
                 listing,
                 analysis,
-                diagnostic=diagnostic_header == "stage_1_2",
+                diagnostic_header=diagnostic_header,
             )
         else:
             text = ""

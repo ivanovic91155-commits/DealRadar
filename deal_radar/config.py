@@ -124,6 +124,109 @@ class RetailConfig:
             raise ValueError(f"Unknown retail price sources: {sorted(unknown_sources)}")
 
 
+def _default_brand_market_mapping() -> dict[str, list[str]]:
+    germany = ["Cube", "Canyon", "Rose", "Focus", "Haibike", "Bulls", "Ghost", "Corratec", "Stevens"]
+    netherlands = ["Gazelle", "Batavus", "Koga", "Cortina", "Sparta"]
+    mapping = {brand: ["DE"] for brand in germany}
+    mapping.update({brand: ["NL"] for brand in netherlands})
+    mapping.update({brand: ["PL", "EU"] for brand in ["Kross"]})
+    mapping.update({brand: ["CZ", "SK"] for brand in ["Author", "Rock Machine"]})
+    mapping.update({brand: ["ES", "EU"] for brand in ["Orbea"]})
+    mapping.update({brand: ["IT", "EU"] for brand in ["Bianchi", "Pinarello", "Colnago"]})
+    mapping.update(
+        {
+            brand: ["DE", "EU"]
+            for brand in ["Trek", "Specialized", "Giant", "Merida", "Scott", "Cannondale"]
+        }
+    )
+    return mapping
+
+
+def _default_market_weights() -> dict[str, float]:
+    return {
+        "exact_cz": 1.00,
+        "close_cz": 0.85,
+        "model_family_cz": 0.60,
+        "component_class_cz": 0.35,
+        "exact_foreign": 0.70,
+        "close_foreign": 0.55,
+        "model_family_foreign": 0.35,
+        "component_class_foreign": 0.20,
+    }
+
+
+@dataclass(slots=True)
+class MarketPricingConfig:
+    enabled: bool = False
+    sources: list[str] = field(
+        default_factory=lambda: ["bazos_cz", "kleinanzeigen_de", "marktplaats_nl", "buycycle_eu"]
+    )
+    quick_sale_discount: float = 0.15
+    max_foreign_markets_per_model: int = 2
+    minimum_unique_comparables_before_fallback: int = 3
+    foreign_market_disagreement_threshold: float = 0.30
+    max_comparable_age_days: int = 180
+    max_results_per_source: int = 25
+    max_queries_per_source: int = 1
+    source_timeout_seconds: int = 20
+    total_timeout_seconds: int = 70
+    circuit_breaker_errors: int = 3
+    circuit_breaker_cooldown_minutes: int = 30
+    expensive_rounding_threshold_czk: int = 50000
+    cheap_rounding_step_czk: int = 100
+    expensive_rounding_step_czk: int = 500
+    exchange_rate_url: str = (
+        "https://www.cnb.cz/en/financial-markets/foreign-exchange-market/"
+        "central-bank-exchange-rate-fixing/central-bank-exchange-rate-fixing/daily.txt"
+    )
+    country_market_adjustment: dict[str, float] = field(
+        default_factory=lambda: {
+            "CZ": 1.0,
+            "DE": 1.0,
+            "NL": 1.0,
+            "SK": 1.0,
+            "PL": 1.0,
+            "AT": 1.0,
+            "ES": 1.0,
+            "IT": 1.0,
+            "EU": 1.0,
+        }
+    )
+    brand_market_mapping: dict[str, list[str]] = field(default_factory=_default_brand_market_mapping)
+    category_market_mapping: dict[str, list[str]] = field(
+        default_factory=lambda: {"city": ["NL", "DE"], "mountain": ["DE", "NL"], "road": ["DE", "EU"], "gravel": ["DE", "EU"]}
+    )
+    weights: dict[str, float] = field(default_factory=_default_market_weights)
+    cache_ttl_hours: dict[str, int] = field(
+        default_factory=lambda: {
+            "high_confidence": 168,
+            "low_confidence": 72,
+            "not_found": 48,
+            "source_error": 1,
+            "exchange_rate": 24,
+        }
+    )
+    depreciation_by_age: dict[str, float] = field(
+        default_factory=lambda: {"0": 0.80, "1": 0.70, "2": 0.62, "3": 0.55, "4": 0.48, "5": 0.42, "6+": 0.35}
+    )
+    auto_calibration_enabled: bool = True
+    auto_calibration_minimum_model_pairs: int = 10
+
+    def validate(self) -> None:
+        if not 0 < self.quick_sale_discount < 1:
+            raise ValueError("market_pricing.quick_sale_discount must be between 0 and 1")
+        if self.max_foreign_markets_per_model not in {1, 2}:
+            raise ValueError("market_pricing.max_foreign_markets_per_model must be 1 or 2")
+        if not 0 < self.foreign_market_disagreement_threshold <= 1:
+            raise ValueError("market_pricing disagreement threshold must be between 0 and 1")
+        allowed_sources = {"bazos_cz", "kleinanzeigen_de", "marktplaats_nl", "buycycle_eu"}
+        unknown = set(self.sources) - allowed_sources
+        if unknown:
+            raise ValueError(f"Unknown market pricing sources: {sorted(unknown)}")
+        if any(value <= 0 for value in self.weights.values()):
+            raise ValueError("market_pricing weights must be positive")
+
+
 def _default_priority_weights() -> dict[str, int]:
     return {
         "very_fresh": 15,
@@ -199,6 +302,7 @@ class AppConfig:
     cyklobazar_profiles: list[CyklobazarProfile] = field(default_factory=list)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     retail: RetailConfig = field(default_factory=RetailConfig)
+    market_pricing: MarketPricingConfig = field(default_factory=MarketPricingConfig)
     priority: PriorityConfig = field(default_factory=PriorityConfig)
 
     def validate(self) -> None:
@@ -215,6 +319,7 @@ class AppConfig:
         for profile in self.cyklobazar_profiles:
             profile.validate()
         self.retail.validate()
+        self.market_pricing.validate()
         self.priority.validate()
 
 
@@ -229,6 +334,7 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     telegram_raw = raw.get("telegram", {})
     retail_raw = raw.get("retail", {})
+    market_raw = raw.get("market_pricing", {})
     priority_raw = raw.get("priority", {})
     codex_env = os.getenv("DEAL_RADAR_CODEX_ENABLED", "").strip().casefold()
     config = AppConfig(
@@ -284,6 +390,51 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
             codex_calls_per_day=int(retail_raw.get("codex_calls_per_day", 10)),
             lookup_delay_seconds=float(retail_raw.get("lookup_delay_seconds", 0.25)),
             max_consecutive_source_errors=int(retail_raw.get("max_consecutive_source_errors", 3)),
+        ),
+        market_pricing=MarketPricingConfig(
+            enabled=bool(market_raw.get("enabled", True)),
+            sources=[str(item) for item in market_raw.get("sources", ["bazos_cz", "kleinanzeigen_de", "marktplaats_nl", "buycycle_eu"])],
+            quick_sale_discount=float(market_raw.get("quick_sale_discount", 0.15)),
+            max_foreign_markets_per_model=int(market_raw.get("max_foreign_markets_per_model", 2)),
+            minimum_unique_comparables_before_fallback=int(market_raw.get("minimum_unique_comparables_before_fallback", 3)),
+            foreign_market_disagreement_threshold=float(market_raw.get("foreign_market_disagreement_threshold", 0.30)),
+            max_comparable_age_days=int(market_raw.get("max_comparable_age_days", 180)),
+            max_results_per_source=int(market_raw.get("max_results_per_source", 25)),
+            max_queries_per_source=int(market_raw.get("max_queries_per_source", 1)),
+            source_timeout_seconds=int(market_raw.get("source_timeout_seconds", 20)),
+            total_timeout_seconds=int(market_raw.get("total_timeout_seconds", 70)),
+            circuit_breaker_errors=int(market_raw.get("circuit_breaker_errors", 3)),
+            circuit_breaker_cooldown_minutes=int(market_raw.get("circuit_breaker_cooldown_minutes", 30)),
+            expensive_rounding_threshold_czk=int(market_raw.get("expensive_rounding_threshold_czk", 50000)),
+            cheap_rounding_step_czk=int(market_raw.get("cheap_rounding_step_czk", 100)),
+            expensive_rounding_step_czk=int(market_raw.get("expensive_rounding_step_czk", 500)),
+            exchange_rate_url=str(market_raw.get("exchange_rate_url", MarketPricingConfig().exchange_rate_url)),
+            country_market_adjustment={
+                **MarketPricingConfig().country_market_adjustment,
+                **{str(key).upper(): float(value) for key, value in market_raw.get("country_market_adjustment", {}).items()},
+            },
+            brand_market_mapping={
+                **_default_brand_market_mapping(),
+                **{str(key): [str(item).upper() for item in value] for key, value in market_raw.get("brand_market_mapping", {}).items()},
+            },
+            category_market_mapping={
+                **MarketPricingConfig().category_market_mapping,
+                **{str(key): [str(item).upper() for item in value] for key, value in market_raw.get("category_market_mapping", {}).items()},
+            },
+            weights={
+                **_default_market_weights(),
+                **{str(key): float(value) for key, value in market_raw.get("weights", {}).items()},
+            },
+            cache_ttl_hours={
+                **MarketPricingConfig().cache_ttl_hours,
+                **{str(key): int(value) for key, value in market_raw.get("cache_ttl_hours", {}).items()},
+            },
+            depreciation_by_age={
+                **MarketPricingConfig().depreciation_by_age,
+                **{str(key): float(value) for key, value in market_raw.get("depreciation_by_age", {}).items()},
+            },
+            auto_calibration_enabled=bool(market_raw.get("auto_calibration", {}).get("enabled", True)),
+            auto_calibration_minimum_model_pairs=int(market_raw.get("auto_calibration", {}).get("minimum_model_pairs", 10)),
         ),
         priority=PriorityConfig(
             urgent_min_score=int(priority_raw.get("urgent_min_score", 80)),

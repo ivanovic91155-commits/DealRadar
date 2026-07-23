@@ -70,16 +70,20 @@ WHEEL_RE = re.compile(
     re.IGNORECASE,
 )
 FRAME_RE = re.compile(
-    r"\b(?:vel(?:ikost)?\.?|size|ram(?:u)?|frame)\s*[:.-]?\s*(xxs|xs|s|m/?l|m|l|xl|xxl|\d{2}(?:[.,]\d)?)\b",
+    r"\b(?:vel(?:ikost)?\.?|size|ram(?:u)?|frame|rahmen(?:gro(?:sse|ße))?|gro(?:sse|ße)|gr\.?|maat|framemaat)\s*[:.-]?\s*(xxs|xs|s|m/?l|m|l|xl|xxl|\d{2}(?:[.,]\d)?)\b",
     re.IGNORECASE,
 )
 PRICE_SUFFIX_RE = re.compile(r"\s*:\s*\d[\d\s.\u00a0]*\s*$")
+TRAVEL_RE = re.compile(r"\b(80|90|100|110|120|130|140|150|160|170|180|190|200)\s*mm\b", re.IGNORECASE)
 
 GENERIC_WORDS = {
     "bike", "bicycle", "bicykl", "cyklo", "e", "elektrokolo", "ebike", "e-bike", "horsky", "horske",
     "jizdni", "kolo", "kola", "mtb", "detske", "detsky", "divci", "damske", "panske", "prodám",
     "alu", "hlinikovy", "prodam", "prodej", "model", "novy", "nove", "zanovni", "v", "vel", "velikost",
-    "ram", "ramu", "frame", "size", "zaruce",
+    "ram", "ramu", "frame", "size", "zaruce", "rahmen", "rahmengrosse", "grosse", "gr",
+    "maat", "framemaat", "framematen", "divers", "kleuren", "en", "herren", "damen",
+    "mountain", "road", "gravel", "city", "hardtail",
+    "xxs", "xs", "s", "m", "m/l", "l", "xl", "xxl",
 }
 COLOR_WORDS = {
     "black", "blue", "bronze", "brown", "bila", "bile", "bily", "cerna", "cerne", "cerny", "cervena",
@@ -161,6 +165,65 @@ def _extract_model(normalized_title: str, brand_span: tuple[int, int] | None) ->
     return model, trim
 
 
+def model_family(model: str) -> str:
+    tokens = normalize_text(model).split()
+    while len(tokens) > 1 and re.fullmatch(r"\d+(?:[.+-]\d+)*|gen\d+", tokens[-1]):
+        tokens.pop()
+    return " ".join(token.title() for token in tokens)
+
+
+def _component_attributes(normalized: str) -> tuple[str, str, str, str, str, int | None]:
+    words = set(normalized.split())
+    if any(term in normalized for term in ("full suspension", "celoodpruz", "fully", "dvojodpruz")):
+        suspension = "full_suspension"
+    elif any(term in words for term in ("hardtail", "pevnak")):
+        suspension = "hardtail"
+    else:
+        suspension = ""
+
+    if any(term in words for term in ("carbon", "karbon", "karbonovy")):
+        frame_material = "carbon"
+    elif any(term in words for term in ("aluminium", "aluminum", "hlinik", "alu")):
+        frame_material = "aluminium"
+    elif any(term in words for term in ("steel", "ocel", "ocelovy")):
+        frame_material = "steel"
+    else:
+        frame_material = ""
+
+    fork_class = ""
+    for candidate, terms in (
+        ("premium", ("fox 36", "fox 38", "lyrik", "zeb", "factory")),
+        ("mid", ("fox 34", "reba", "sid", "pike", "revelation", "judy")),
+        ("entry", ("suntour", "xc30", "xc32", "xcr", "rst")),
+    ):
+        if any(term in normalized for term in terms):
+            fork_class = candidate
+            break
+
+    drivetrain_class = ""
+    for candidate, terms in (
+        ("premium", ("xtr", "xx1", "x01", "dura ace", "red axs")),
+        ("upper", ("deore xt", "ultegra", "gx eagle", "force axs")),
+        ("mid", ("deore", "slx", "nx eagle", "105", "rival")),
+        ("entry", ("altus", "acera", "alivio", "tourney", "sx eagle")),
+    ):
+        if any(term in normalized for term in terms):
+            drivetrain_class = candidate
+            break
+
+    if any(term in normalized for term in ("hydraulic", "hydraulicke", "hydraulicke brzdy")):
+        brake_class = "hydraulic_disc"
+    elif any(term in normalized for term in ("mechanical disc", "mechanicke kotouc")):
+        brake_class = "mechanical_disc"
+    elif any(term in normalized for term in ("rim brake", "v brake", "rafkove")):
+        brake_class = "rim"
+    else:
+        brake_class = ""
+    travel_match = TRAVEL_RE.search(normalized)
+    travel = int(travel_match.group(1)) if travel_match else None
+    return suspension, frame_material, fork_class, drivetrain_class, brake_class, travel
+
+
 def identify_bike(title: str, description: str = "") -> BikeIdentity:
     clean_title = PRICE_SUFFIX_RE.sub("", title).strip()
     normalized_title = normalize_text(clean_title)
@@ -175,7 +238,7 @@ def identify_bike(title: str, description: str = "") -> BikeIdentity:
         ("road", ("silnicni", "road")),
         ("city", ("mestske", "city", "trekking")),
         ("bmx", ("bmx",)),
-        ("mountain", ("horske", "horsky", "mtb", "trail", "enduro", "downhill")),
+        ("mountain", ("horske", "horsky", "mtb", "mountain", "trail", "enduro", "downhill")),
     ]
     for candidate, words in type_patterns:
         if any(word in normalized_all.split() for word in words):
@@ -202,6 +265,9 @@ def identify_bike(title: str, description: str = "") -> BikeIdentity:
     confidence += 0.06 if year else 0.0
     confidence += 0.04 if wheel else 0.0
     confidence += 0.03 if bike_type else 0.0
+    suspension, frame_material, fork_class, drivetrain_class, brake_class, travel = (
+        _component_attributes(normalized_all)
+    )
     return BikeIdentity(
         brand=brand,
         model=model,
@@ -213,6 +279,13 @@ def identify_bike(title: str, description: str = "") -> BikeIdentity:
         bike_type=bike_type,
         electric=electric,
         audience=audience,
+        model_family=model_family(model),
+        suspension_type=suspension,
+        frame_material=frame_material,
+        fork_class=fork_class,
+        drivetrain_class=drivetrain_class,
+        brake_class=brake_class,
+        travel_mm=travel,
         confidence=round(confidence, 2),
     )
 

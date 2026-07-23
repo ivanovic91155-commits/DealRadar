@@ -19,7 +19,15 @@ from deal_radar.duplicates import (
     normalize_duplicate_text,
     text_similarity,
 )
-from deal_radar.models import Listing, ListingAnalysis, UsedComparable, UsedComparables, Valuation
+from deal_radar.models import (
+    Listing,
+    ListingAnalysis,
+    MarketComparable,
+    MarketValuation,
+    UsedComparable,
+    UsedComparables,
+    Valuation,
+)
 
 
 def _now() -> str:
@@ -82,6 +90,119 @@ class Storage:
             );
             CREATE INDEX IF NOT EXISTS listing_duplicates_group_idx
             ON listing_duplicates(group_id);
+            CREATE TABLE IF NOT EXISTS pricing_comparables (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                valuation_listing_source TEXT NOT NULL,
+                valuation_listing_external_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_listing_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                country TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                price_original REAL,
+                currency TEXT NOT NULL,
+                price_czk INTEGER,
+                brand TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                model_family TEXT NOT NULL DEFAULT '',
+                generation TEXT NOT NULL DEFAULT '',
+                trim TEXT NOT NULL DEFAULT '',
+                year INTEGER,
+                frame_size TEXT NOT NULL DEFAULT '',
+                wheel_size TEXT NOT NULL DEFAULT '',
+                bike_type TEXT NOT NULL DEFAULT '',
+                is_ebike INTEGER,
+                suspension_type TEXT NOT NULL DEFAULT '',
+                frame_material TEXT NOT NULL DEFAULT '',
+                fork_class TEXT NOT NULL DEFAULT '',
+                drivetrain_class TEXT NOT NULL DEFAULT '',
+                brake_class TEXT NOT NULL DEFAULT '',
+                travel_mm INTEGER,
+                match_type TEXT NOT NULL,
+                match_score REAL NOT NULL,
+                listing_fingerprint TEXT NOT NULL,
+                image_fingerprint TEXT NOT NULL DEFAULT '',
+                duplicate_group_id TEXT NOT NULL DEFAULT '',
+                published_at TEXT NOT NULL DEFAULT '',
+                first_seen_at TEXT NOT NULL DEFAULT '',
+                last_seen_at TEXT NOT NULL DEFAULT '',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                image_url TEXT NOT NULL DEFAULT '',
+                seller TEXT NOT NULL DEFAULT '',
+                location TEXT NOT NULL DEFAULT '',
+                weight REAL NOT NULL DEFAULT 0,
+                exclusion_reason TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (
+                    valuation_listing_source,
+                    valuation_listing_external_id,
+                    source,
+                    source_listing_id
+                )
+            );
+            CREATE INDEX IF NOT EXISTS pricing_comparables_valuation_idx
+            ON pricing_comparables(valuation_listing_source, valuation_listing_external_id);
+            CREATE INDEX IF NOT EXISTS pricing_comparables_fingerprint_idx
+            ON pricing_comparables(listing_fingerprint);
+            CREATE TABLE IF NOT EXISTS market_valuations (
+                listing_source TEXT NOT NULL,
+                listing_external_id TEXT NOT NULL,
+                market_price_czk INTEGER,
+                quick_sale_price_czk INTEGER,
+                price_low_czk INTEGER,
+                price_high_czk INTEGER,
+                confidence TEXT NOT NULL,
+                valuation_method TEXT NOT NULL,
+                status TEXT NOT NULL,
+                comparables_total INTEGER NOT NULL,
+                comparables_unique INTEGER NOT NULL,
+                exact_comparables INTEGER NOT NULL,
+                close_comparables INTEGER NOT NULL,
+                family_comparables INTEGER NOT NULL,
+                component_comparables INTEGER NOT NULL,
+                cz_comparables INTEGER NOT NULL,
+                foreign_comparables INTEGER NOT NULL,
+                countries_used TEXT NOT NULL,
+                sources_used TEXT NOT NULL,
+                warnings TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                calculated_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                PRIMARY KEY (listing_source, listing_external_id)
+            );
+            CREATE TABLE IF NOT EXISTS market_lookup_cache (
+                cache_key TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                market TEXT NOT NULL,
+                status TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS exchange_rates (
+                currency TEXT PRIMARY KEY,
+                rate_to_czk REAL NOT NULL,
+                valid_date TEXT NOT NULL,
+                source TEXT NOT NULL,
+                fetched_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS market_source_health (
+                source TEXT PRIMARY KEY,
+                consecutive_errors INTEGER NOT NULL DEFAULT 0,
+                open_until TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS country_market_calibration (
+                country TEXT NOT NULL,
+                bike_type TEXT NOT NULL DEFAULT '',
+                adjustment REAL NOT NULL,
+                sample_size INTEGER NOT NULL,
+                calculated_at TEXT NOT NULL,
+                PRIMARY KEY (country, bike_type)
+            );
             """
         )
         feedback_columns = {
@@ -576,6 +697,355 @@ class Storage:
             items=matches,
             confidence=confidence,
         )
+
+    def local_market_candidates(
+        self,
+        listing: Listing,
+        *,
+        max_age_days: int,
+    ) -> list[MarketComparable]:
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+        rows = self.connection.execute(
+            """
+            SELECT l.data_json, l.first_seen_at, l.last_seen_at, d.group_id
+            FROM listings l
+            LEFT JOIN listing_duplicates d
+              ON d.source = l.source AND d.external_id = l.external_id
+            WHERE l.last_seen_at >= ?
+            ORDER BY l.last_seen_at DESC
+            """,
+            (cutoff.isoformat(),),
+        ).fetchall()
+        result: list[MarketComparable] = []
+        for row in rows:
+            candidate = Listing.from_dict(json.loads(row["data_json"]))
+            price = candidate.price_amount if candidate.price_amount is not None else candidate.price_czk
+            if not price or price <= 0:
+                continue
+            identity = identify_listing(candidate)
+            result.append(
+                MarketComparable(
+                    source=candidate.source,
+                    source_listing_id=candidate.external_id,
+                    url=candidate.url,
+                    country="CZ",
+                    title=candidate.title,
+                    description=candidate.description,
+                    price_original=float(price),
+                    currency=candidate.currency or "CZK",
+                    price_czk=candidate.price_czk,
+                    brand=identity.brand,
+                    model=identity.model,
+                    model_family=identity.model_family,
+                    generation=identity.generation,
+                    trim=identity.trim,
+                    year=identity.model_year,
+                    frame_size=identity.frame_size,
+                    wheel_size=identity.wheel_size,
+                    bike_type=identity.bike_type,
+                    is_ebike=identity.electric,
+                    suspension_type=identity.suspension_type,
+                    frame_material=identity.frame_material,
+                    fork_class=identity.fork_class,
+                    drivetrain_class=identity.drivetrain_class,
+                    brake_class=identity.brake_class,
+                    travel_mm=identity.travel_mm,
+                    listing_fingerprint=description_fingerprint(candidate.description),
+                    duplicate_group_id=str(row["group_id"] or ""),
+                    published_at=candidate.published_at.isoformat() if candidate.published_at else "",
+                    first_seen_at=str(row["first_seen_at"]),
+                    last_seen_at=str(row["last_seen_at"]),
+                    image_url=candidate.image_url or "",
+                    location=candidate.location or "",
+                )
+            )
+        return result
+
+    def get_cached_market_valuation(self, listing: Listing) -> MarketValuation | None:
+        row = self.connection.execute(
+            """
+            SELECT data_json, expires_at FROM market_valuations
+            WHERE listing_source = ? AND listing_external_id = ?
+            """,
+            (listing.source, listing.external_id),
+        ).fetchone()
+        if not row or datetime.fromisoformat(row["expires_at"]) <= datetime.now(UTC):
+            return None
+        valuation = MarketValuation.from_dict(json.loads(row["data_json"]))
+        valuation.cache_used = True
+        valuation.cache_hits += 1
+        return valuation
+
+    def get_latest_market_valuation(self, source: str, external_id: str) -> MarketValuation | None:
+        row = self.connection.execute(
+            """
+            SELECT data_json FROM market_valuations
+            WHERE listing_source = ? AND listing_external_id = ?
+            """,
+            (source, external_id),
+        ).fetchone()
+        return MarketValuation.from_dict(json.loads(row["data_json"])) if row else None
+
+    def save_market_valuation(self, listing: Listing, valuation: MarketValuation) -> None:
+        payload = json.dumps(valuation.to_dict(), ensure_ascii=False)
+        now = _now()
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO market_valuations (
+                    listing_source, listing_external_id, market_price_czk,
+                    quick_sale_price_czk, price_low_czk, price_high_czk,
+                    confidence, valuation_method, status, comparables_total,
+                    comparables_unique, exact_comparables, close_comparables,
+                    family_comparables, component_comparables, cz_comparables,
+                    foreign_comparables, countries_used, sources_used, warnings,
+                    data_json, calculated_at, expires_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                ON CONFLICT(listing_source, listing_external_id) DO UPDATE SET
+                    market_price_czk = excluded.market_price_czk,
+                    quick_sale_price_czk = excluded.quick_sale_price_czk,
+                    price_low_czk = excluded.price_low_czk,
+                    price_high_czk = excluded.price_high_czk,
+                    confidence = excluded.confidence,
+                    valuation_method = excluded.valuation_method,
+                    status = excluded.status,
+                    comparables_total = excluded.comparables_total,
+                    comparables_unique = excluded.comparables_unique,
+                    exact_comparables = excluded.exact_comparables,
+                    close_comparables = excluded.close_comparables,
+                    family_comparables = excluded.family_comparables,
+                    component_comparables = excluded.component_comparables,
+                    cz_comparables = excluded.cz_comparables,
+                    foreign_comparables = excluded.foreign_comparables,
+                    countries_used = excluded.countries_used,
+                    sources_used = excluded.sources_used,
+                    warnings = excluded.warnings,
+                    data_json = excluded.data_json,
+                    calculated_at = excluded.calculated_at,
+                    expires_at = excluded.expires_at
+                """,
+                (
+                    listing.source,
+                    listing.external_id,
+                    valuation.market_price_czk,
+                    valuation.quick_sale_price_czk,
+                    valuation.price_low_czk,
+                    valuation.price_high_czk,
+                    valuation.confidence,
+                    valuation.valuation_method,
+                    valuation.status,
+                    valuation.comparables_total,
+                    valuation.comparables_unique,
+                    valuation.exact_comparables,
+                    valuation.close_comparables,
+                    valuation.family_comparables,
+                    valuation.component_comparables,
+                    valuation.cz_comparables,
+                    valuation.foreign_comparables,
+                    json.dumps(valuation.countries_used, ensure_ascii=False),
+                    json.dumps(valuation.sources_used, ensure_ascii=False),
+                    json.dumps(valuation.warnings, ensure_ascii=False),
+                    payload,
+                    valuation.calculated_at,
+                    valuation.expires_at,
+                ),
+            )
+            self.connection.execute(
+                """
+                DELETE FROM pricing_comparables
+                WHERE valuation_listing_source = ? AND valuation_listing_external_id = ?
+                """,
+                (listing.source, listing.external_id),
+            )
+            for comparable in valuation.comparables + valuation.rejected_comparables:
+                values = comparable.to_dict()
+                values.update(
+                    {
+                        "valuation_listing_source": listing.source,
+                        "valuation_listing_external_id": listing.external_id,
+                        "is_ebike": None if comparable.is_ebike is None else int(comparable.is_ebike),
+                        "is_active": int(comparable.is_active),
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+                self.connection.execute(
+                    """
+                    INSERT OR REPLACE INTO pricing_comparables (
+                        valuation_listing_source, valuation_listing_external_id,
+                        source, source_listing_id, url, country, title, description,
+                        price_original, currency, price_czk, brand, model, model_family,
+                        generation, trim, year, frame_size, wheel_size, bike_type,
+                        is_ebike, suspension_type, frame_material, fork_class,
+                        drivetrain_class, brake_class, travel_mm, match_type,
+                        match_score, listing_fingerprint, image_fingerprint,
+                        duplicate_group_id, published_at, first_seen_at, last_seen_at,
+                        is_active, image_url, seller, location, weight,
+                        exclusion_reason, created_at, updated_at
+                    ) VALUES (
+                        :valuation_listing_source, :valuation_listing_external_id,
+                        :source, :source_listing_id, :url, :country, :title, :description,
+                        :price_original, :currency, :price_czk, :brand, :model, :model_family,
+                        :generation, :trim, :year, :frame_size, :wheel_size, :bike_type,
+                        :is_ebike, :suspension_type, :frame_material, :fork_class,
+                        :drivetrain_class, :brake_class, :travel_mm, :match_type,
+                        :match_score, :listing_fingerprint, :image_fingerprint,
+                        :duplicate_group_id, :published_at, :first_seen_at, :last_seen_at,
+                        :is_active, :image_url, :seller, :location, :weight,
+                        :exclusion_reason, :created_at, :updated_at
+                    )
+                    """,
+                    values,
+                )
+
+    def get_market_lookup_cache(self, cache_key: str) -> tuple[str, list[MarketComparable]] | None:
+        row = self.connection.execute(
+            "SELECT status, data_json, expires_at FROM market_lookup_cache WHERE cache_key = ?",
+            (cache_key,),
+        ).fetchone()
+        if not row or datetime.fromisoformat(row["expires_at"]) <= datetime.now(UTC):
+            return None
+        items = [MarketComparable.from_dict(item) for item in json.loads(row["data_json"])]
+        return str(row["status"]), items
+
+    def save_market_lookup_cache(
+        self,
+        cache_key: str,
+        source: str,
+        market: str,
+        status: str,
+        items: list[MarketComparable],
+        ttl_hours: int,
+    ) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO market_lookup_cache
+                (cache_key, source, market, status, data_json, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    status = excluded.status,
+                    data_json = excluded.data_json,
+                    created_at = excluded.created_at,
+                    expires_at = excluded.expires_at
+                """,
+                (
+                    cache_key,
+                    source,
+                    market,
+                    status,
+                    json.dumps([item.to_dict() for item in items], ensure_ascii=False),
+                    _now(),
+                    (datetime.now(UTC) + timedelta(hours=max(1, ttl_hours))).isoformat(),
+                ),
+            )
+
+    def market_source_available(self, source: str) -> bool:
+        row = self.connection.execute(
+            "SELECT open_until FROM market_source_health WHERE source = ?", (source,)
+        ).fetchone()
+        if not row or not row["open_until"]:
+            return True
+        return datetime.fromisoformat(row["open_until"]) <= datetime.now(UTC)
+
+    def record_market_source_success(self, source: str) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO market_source_health
+                (source, consecutive_errors, open_until, last_error, updated_at)
+                VALUES (?, 0, '', '', ?)
+                ON CONFLICT(source) DO UPDATE SET
+                    consecutive_errors = 0, open_until = '', last_error = '', updated_at = excluded.updated_at
+                """,
+                (source, _now()),
+            )
+
+    def record_market_source_error(
+        self,
+        source: str,
+        error: str,
+        *,
+        threshold: int,
+        cooldown_minutes: int,
+    ) -> int:
+        row = self.connection.execute(
+            "SELECT consecutive_errors FROM market_source_health WHERE source = ?", (source,)
+        ).fetchone()
+        count = int(row["consecutive_errors"] if row else 0) + 1
+        open_until = (
+            (datetime.now(UTC) + timedelta(minutes=cooldown_minutes)).isoformat()
+            if count >= threshold
+            else ""
+        )
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO market_source_health
+                (source, consecutive_errors, open_until, last_error, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(source) DO UPDATE SET
+                    consecutive_errors = excluded.consecutive_errors,
+                    open_until = excluded.open_until,
+                    last_error = excluded.last_error,
+                    updated_at = excluded.updated_at
+                """,
+                (source, count, open_until, error[:300], _now()),
+            )
+        return count
+
+    def load_exchange_rates(self) -> tuple[dict[str, float], str, str]:
+        rows = self.connection.execute(
+            "SELECT currency, rate_to_czk, valid_date, source, fetched_at FROM exchange_rates"
+        ).fetchall()
+        if not rows:
+            return {}, "", ""
+        return (
+            {str(row["currency"]): float(row["rate_to_czk"]) for row in rows},
+            str(rows[0]["valid_date"]),
+            str(rows[0]["fetched_at"]),
+        )
+
+    def save_exchange_rates(
+        self,
+        rates: dict[str, float],
+        valid_date: str,
+        source: str,
+        fetched_at: str,
+    ) -> None:
+        with self.connection:
+            for currency, rate in rates.items():
+                self.connection.execute(
+                    """
+                    INSERT INTO exchange_rates
+                    (currency, rate_to_czk, valid_date, source, fetched_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(currency) DO UPDATE SET
+                        rate_to_czk = excluded.rate_to_czk,
+                        valid_date = excluded.valid_date,
+                        source = excluded.source,
+                        fetched_at = excluded.fetched_at
+                    """,
+                    (currency, rate, valid_date, source, fetched_at),
+                )
+
+    def recent_active_listings(self, limit: int = 50) -> list[Listing]:
+        rows = self.connection.execute(
+            """
+            SELECT l.data_json
+            FROM listings l
+            LEFT JOIN listing_duplicates d
+              ON d.source = l.source AND d.external_id = l.external_id
+            WHERE l.last_seen_at >= ?
+              AND (d.is_canonical IS NULL OR d.is_canonical = 1 OR d.match_level = 'possible')
+            ORDER BY l.last_seen_at DESC, l.first_seen_at DESC
+            LIMIT ?
+            """,
+            ((datetime.now(UTC) - timedelta(days=7)).isoformat(), max(1, limit)),
+        ).fetchall()
+        return [Listing.from_dict(json.loads(row["data_json"])) for row in rows]
 
     def mark_sent(self, listing: Listing, message_id: int) -> None:
         with self.connection:

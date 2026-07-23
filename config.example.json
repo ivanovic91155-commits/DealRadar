@@ -84,6 +84,95 @@
     "lookup_delay_seconds": 0.25,
     "max_consecutive_source_errors": 3
   },
+  "market_pricing": {
+    "enabled": true,
+    "sources": ["bazos_cz", "kleinanzeigen_de", "marktplaats_nl", "buycycle_eu"],
+    "quick_sale_discount": 0.15,
+    "max_foreign_markets_per_model": 2,
+    "minimum_unique_comparables_before_fallback": 3,
+    "foreign_market_disagreement_threshold": 0.30,
+    "max_comparable_age_days": 180,
+    "max_results_per_source": 25,
+    "max_queries_per_source": 1,
+    "source_timeout_seconds": 20,
+    "total_timeout_seconds": 70,
+    "circuit_breaker_errors": 3,
+    "circuit_breaker_cooldown_minutes": 30,
+    "expensive_rounding_threshold_czk": 50000,
+    "cheap_rounding_step_czk": 100,
+    "expensive_rounding_step_czk": 500,
+    "country_market_adjustment": {
+      "CZ": 1.0,
+      "DE": 1.0,
+      "NL": 1.0,
+      "SK": 1.0,
+      "PL": 1.0,
+      "AT": 1.0,
+      "ES": 1.0,
+      "IT": 1.0,
+      "EU": 1.0
+    },
+    "brand_market_mapping": {
+      "Cube": ["DE"],
+      "Canyon": ["DE"],
+      "Rose": ["DE"],
+      "Focus": ["DE"],
+      "Haibike": ["DE"],
+      "Bulls": ["DE"],
+      "Ghost": ["DE"],
+      "Gazelle": ["NL"],
+      "Batavus": ["NL"],
+      "Koga": ["NL"],
+      "Kross": ["PL", "EU"],
+      "Author": ["CZ", "SK"],
+      "Rock Machine": ["CZ", "SK"],
+      "Orbea": ["ES", "EU"],
+      "Bianchi": ["IT", "EU"],
+      "Pinarello": ["IT", "EU"],
+      "Colnago": ["IT", "EU"],
+      "Trek": ["DE", "EU"],
+      "Specialized": ["DE", "EU"],
+      "Giant": ["DE", "EU"],
+      "Merida": ["DE", "EU"],
+      "Scott": ["DE", "EU"]
+    },
+    "category_market_mapping": {
+      "city": ["NL", "DE"],
+      "mountain": ["DE", "NL"],
+      "road": ["DE", "EU"],
+      "gravel": ["DE", "EU"]
+    },
+    "weights": {
+      "exact_cz": 1.0,
+      "close_cz": 0.85,
+      "model_family_cz": 0.6,
+      "component_class_cz": 0.35,
+      "exact_foreign": 0.7,
+      "close_foreign": 0.55,
+      "model_family_foreign": 0.35,
+      "component_class_foreign": 0.2
+    },
+    "cache_ttl_hours": {
+      "high_confidence": 168,
+      "low_confidence": 72,
+      "not_found": 48,
+      "source_error": 1,
+      "exchange_rate": 24
+    },
+    "depreciation_by_age": {
+      "0": 0.8,
+      "1": 0.7,
+      "2": 0.62,
+      "3": 0.55,
+      "4": 0.48,
+      "5": 0.42,
+      "6+": 0.35
+    },
+    "auto_calibration": {
+      "enabled": true,
+      "minimum_model_pairs": 10
+    }
+  },
   "priority": {
     "urgent_min_score": 80,
     "interesting_min_score": 60,
