@@ -188,6 +188,14 @@ class StorageTest(unittest.TestCase):
                 }
                 self.assertIn("analysis_json", listing_columns)
                 self.assertIn("notification_status", listing_columns)
+                tables = {
+                    row["name"]
+                    for row in storage.connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                self.assertIn("deal_evaluations", tables)
+                self.assertIn("deal_cost_overrides", tables)
                 self.assertEqual(
                     storage.connection.execute("SELECT COUNT(*) FROM feedback").fetchone()[0],
                     1,

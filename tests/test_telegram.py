@@ -8,7 +8,17 @@ import unittest
 
 from deal_radar.config import AppConfig, RetailConfig, SearchProfile, TelegramConfig
 from deal_radar.http import HttpError
-from deal_radar.models import BikeIdentity, Listing, ListingAnalysis, RetailOffer, UsedComparables, Valuation
+from deal_radar.models import (
+    BikeIdentity,
+    DealEvaluation,
+    Listing,
+    ListingAnalysis,
+    MarketComparable,
+    MarketValuation,
+    RetailOffer,
+    UsedComparables,
+    Valuation,
+)
 from deal_radar.service import DealRadarService
 from deal_radar.telegram import TelegramClient, format_seller_price
 
@@ -88,6 +98,132 @@ class TelegramValuationTest(unittest.TestCase):
 
 
 class TelegramFeedbackTest(unittest.TestCase):
+    def test_stage_2_2_card_extends_existing_pipeline_and_keeps_buttons(self) -> None:
+        listing = Listing(
+            source="bazos",
+            external_id="stage22",
+            title="Trek Marlin 7",
+            description="Po servisu a bez investic",
+            url="https://www.bazos.cz/inzerat/stage22/trek-marlin.php",
+            profile="Praha",
+            price_czk=12000,
+            price_amount=12000,
+            price_status="numeric",
+        )
+        market = MarketValuation(
+            listing_source="bazos",
+            listing_external_id="stage22",
+            market_price_czk=20000,
+            quick_sale_price_czk=17000,
+            price_low_czk=18000,
+            price_high_czk=22000,
+            confidence="medium",
+            valuation_method="weighted_median",
+            status="market_price_found",
+            comparables_total=4,
+            comparables_unique=3,
+            exact_comparables=2,
+            close_comparables=1,
+            cz_comparables=3,
+            countries_used=["CZ"],
+            sources_used=["bazos_cz"],
+            comparables=[
+                MarketComparable(
+                    source="bazos_cz",
+                    source_listing_id="comparable",
+                    url="https://www.bazos.cz/inzerat/comparable/trek.php",
+                    country="CZ",
+                    title="Trek Marlin 7 comparable",
+                    price_original=19500,
+                    currency="CZK",
+                    price_czk=19500,
+                    match_type="exact",
+                    match_score=0.95,
+                )
+            ],
+        )
+        deal = DealEvaluation(
+            listing_source="bazos",
+            listing_external_id="stage22",
+            algorithm_version="2.2.0",
+            status="HOT",
+            purchase_price_czk=12000,
+            risk_reserve_czk=1200,
+            total_investment_czk=13200,
+            market_median_czk=20000,
+            quick_sale_price_czk=17000,
+            net_profit_czk=3800,
+            roi_percent=28.79,
+            liquidity_score=60,
+            liquidity_level="medium",
+            estimated_days_to_sell=45,
+            confidence_score=65,
+            confidence_level="medium",
+            deal_score=74.5,
+            explanation="Выполнен сценарий HOT по правилу ROI.",
+        )
+        item_analysis = ListingAnalysis(
+            72,
+            "interesting_candidate",
+            identity=BikeIdentity(brand="Trek", model="Marlin 7"),
+            market_valuation=market,
+            deal_evaluation=deal,
+        )
+        telegram = ApiTelegram()
+        telegram.send_listing(listing, retail_enabled=False, analysis=item_analysis)
+        method, fields = telegram.calls[0]
+        self.assertEqual(method, "sendMessage")
+        self.assertIn("🔥 HOT — 74/100", fields["text"])
+        self.assertIn("Оценка сделки", fields["text"])
+        self.assertIn("Полное вложение: 13 200 Kč", fields["text"])
+        self.assertIn("Чистая прибыль: 3 800 Kč", fields["text"])
+        self.assertIn("ROI: 28.8%", fields["text"])
+        self.assertIn("Ликвидность: средняя", fields["text"])
+        self.assertIn("https://www.bazos.cz/inzerat/comparable/trek.php", fields["text"])
+        keyboard = json.loads(fields["reply_markup"])
+        callbacks = [
+            button["callback_data"]
+            for row in keyboard["inline_keyboard"]
+            for button in row
+            if "callback_data" in button
+        ]
+        self.assertIn("fb:i:b:stage22", callbacks)
+        self.assertIn("fb:n:b:stage22", callbacks)
+        self.assertIn("fb:e:b:stage22", callbacks)
+
+    def test_stage_2_2_manual_review_question_is_shown_first_as_warning(self) -> None:
+        listing = self._listing()
+        item_analysis = ListingAnalysis(
+            40,
+            "manual_review",
+            identity=BikeIdentity(brand="Trek", model="Marlin 7"),
+            deal_evaluation=DealEvaluation(
+                listing_source=listing.source,
+                listing_external_id=listing.external_id,
+                algorithm_version="2.2.0",
+                status="MANUAL_REVIEW",
+                purchase_price_czk=10000,
+                quick_sale_price_czk=17000,
+                total_investment_czk=11000,
+                net_profit_czk=6000,
+                roi_percent=54.55,
+                liquidity_level="medium",
+                confidence_level="low",
+                deal_score=51,
+                explanation="Оценка рынка имеет низкую уверенность.",
+                manual_review_question="Проверьте необходимость обслуживания вилки.",
+            ),
+        )
+        telegram = ApiTelegram()
+        telegram.send_listing(listing, retail_enabled=False, analysis=item_analysis)
+        self.assertIn("MANUAL REVIEW", telegram.calls[0][1]["text"])
+        self.assertIn(
+            "Нужна ручная проверка: Проверьте необходимость обслуживания вилки.",
+            telegram.calls[0][1]["text"],
+        )
+        text = telegram.calls[0][1]["text"]
+        self.assertLess(text.index("Нужна ручная проверка"), text.index("Покупка:"))
+
     def test_stage_1_2_card_contains_priority_sources_used_warning_and_old_buttons(self) -> None:
         listing = Listing(
             source="cyklobazar",

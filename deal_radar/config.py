@@ -21,6 +21,23 @@ def load_dotenv(path: str | Path = ".env") -> None:
         os.environ.setdefault(key, value)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    return default if value is None or not value.strip() else float(value)
+
+
 @dataclass(slots=True)
 class SearchProfile:
     name: str
@@ -289,6 +306,161 @@ class PriorityConfig:
             raise ValueError("priority duplicate similarity thresholds are invalid")
 
 
+def _default_deal_score_weights() -> dict[str, float]:
+    return {
+        "profit": 25.0,
+        "roi": 25.0,
+        "liquidity": 20.0,
+        "confidence": 15.0,
+        "condition": 10.0,
+        "risk": 5.0,
+    }
+
+
+@dataclass(slots=True)
+class DealScoringConfig:
+    enabled: bool = False
+    algorithm_version: str = "2.2.0"
+    risk_reserve_percent: float = 10.0
+    hot_min_profit_czk: float = 4000.0
+    hot_min_roi_percent: float = 20.0
+    interesting_min_roi_percent: float = 15.0
+    high_roi_percent: float = 100.0
+    hot_min_liquidity_score: int = 50
+    hot_min_confidence_score: int = 50
+    manual_review_on_low_confidence: bool = True
+    telegram_send_hot: bool = True
+    telegram_send_interesting: bool = True
+    telegram_send_manual_review: bool = True
+    telegram_send_low_priority: bool = False
+    telegram_send_reject: bool = False
+    liquidity_high_min_score: int = 70
+    liquidity_medium_min_score: int = 50
+    liquidity_exact_points: int = 12
+    liquidity_close_points: int = 8
+    liquidity_family_points: int = 4
+    liquidity_component_points: int = 2
+    liquidity_source_points: int = 5
+    liquidity_source_count_cap: int = 4
+    liquidity_czech_bonus: int = 10
+    estimated_days_high: int = 21
+    estimated_days_medium: int = 45
+    estimated_days_low: int = 75
+    confidence_scores: dict[str, int] = field(
+        default_factory=lambda: {"high": 85, "medium": 65, "low": 35}
+    )
+    minimum_identity_confidence: float = 0.55
+    price_outlier_discount_percent: float = 80.0
+    profit_score_target_czk: float = 8000.0
+    roi_score_target_percent: float = 100.0
+    risk_penalty_per_flag: float = 20.0
+    score_weights: dict[str, float] = field(default_factory=_default_deal_score_weights)
+    condition_scores: dict[str, float] = field(
+        default_factory=lambda: {
+            "excellent": 100.0,
+            "good": 85.0,
+            "unknown": 50.0,
+            "service_required": 20.0,
+            "problematic": 10.0,
+            "contradictory": 10.0,
+        }
+    )
+    positive_condition_terms: list[str] = field(
+        default_factory=lambda: [
+            "bez investic",
+            "po servisu",
+            "pravidelny servis",
+            "top stav",
+            "perfektni stav",
+            "velmi dobry stav",
+            "vyborny stav",
+            "ready to ride",
+            "fully serviced",
+        ]
+    )
+    service_required_terms: list[str] = field(
+        default_factory=lambda: [
+            "nutny servis",
+            "potrebuje servis",
+            "pred servisem",
+            "servis vidlice",
+            "servis tlumice",
+            "vymena retezu",
+            "nutna vymena",
+            "needs service",
+            "requires service",
+            "service required",
+        ]
+    )
+    problem_condition_terms: list[str] = field(
+        default_factory=lambda: [
+            "na opravu",
+            "nepojizdne",
+            "poskozene",
+            "praskly ram",
+            "nefunkcni",
+            "repair needed",
+            "not working",
+            "damaged frame",
+        ]
+    )
+    critical_valuation_statuses: list[str] = field(
+        default_factory=lambda: [
+            "insufficient_comparables",
+            "ambiguous_model",
+            "currency_error",
+            "source_unavailable",
+            "duplicate_only_results",
+            "no_matching_comparables",
+        ]
+    )
+    critical_warning_terms: list[str] = field(
+        default_factory=lambda: [
+            "критичес",
+            "неоднознач",
+            "несовместим",
+            "critical",
+            "ambiguous",
+            "mismatch",
+        ]
+    )
+    manual_review_risk_terms: list[str] = field(
+        default_factory=lambda: [
+            "модель не подтверждена",
+            "цена подозрительно низкая",
+            "числовая цена продавца отсутствует",
+            "требуется ручная проверка",
+            "model is ambiguous",
+            "suspiciously low price",
+            "manual review required",
+        ]
+    )
+
+    def validate(self) -> None:
+        if not 0 <= self.risk_reserve_percent <= 100:
+            raise ValueError("deal_scoring.risk_reserve_percent must be between 0 and 100")
+        if not 0 <= self.interesting_min_roi_percent <= self.hot_min_roi_percent:
+            raise ValueError("deal_scoring ROI thresholds are invalid")
+        if self.high_roi_percent < self.hot_min_roi_percent:
+            raise ValueError("deal_scoring.high_roi_percent must not be below HOT ROI")
+        if not 0 <= self.hot_min_liquidity_score <= 100:
+            raise ValueError("deal_scoring.hot_min_liquidity_score must be between 0 and 100")
+        if not 0 <= self.hot_min_confidence_score <= 100:
+            raise ValueError("deal_scoring.hot_min_confidence_score must be between 0 and 100")
+        if not 0 <= self.liquidity_medium_min_score <= self.liquidity_high_min_score <= 100:
+            raise ValueError("deal_scoring liquidity thresholds are invalid")
+        if self.profit_score_target_czk <= 0 or self.roi_score_target_percent <= 0:
+            raise ValueError("deal_scoring component score targets must be positive")
+        if not self.score_weights or any(value < 0 for value in self.score_weights.values()):
+            raise ValueError("deal_scoring score weights must be non-negative")
+        if sum(self.score_weights.values()) <= 0:
+            raise ValueError("deal_scoring score weights must have a positive sum")
+        if any(not 0 <= value <= 100 for value in self.confidence_scores.values()):
+            raise ValueError("deal_scoring confidence scores must be between 0 and 100")
+        if any(not 0 <= value <= 100 for value in self.condition_scores.values()):
+            raise ValueError("deal_scoring condition scores must be between 0 and 100")
+
+
 @dataclass(slots=True)
 class AppConfig:
     database_path: str = "data/deal_radar.sqlite3"
@@ -304,6 +476,7 @@ class AppConfig:
     retail: RetailConfig = field(default_factory=RetailConfig)
     market_pricing: MarketPricingConfig = field(default_factory=MarketPricingConfig)
     priority: PriorityConfig = field(default_factory=PriorityConfig)
+    deal_scoring: DealScoringConfig = field(default_factory=DealScoringConfig)
 
     def validate(self) -> None:
         if self.bootstrap_mode not in {"send_latest", "skip_existing", "send_all"}:
@@ -321,6 +494,7 @@ class AppConfig:
         self.retail.validate()
         self.market_pricing.validate()
         self.priority.validate()
+        self.deal_scoring.validate()
 
 
 def load_config(path: str | Path = "config.json") -> AppConfig:
@@ -336,6 +510,7 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
     retail_raw = raw.get("retail", {})
     market_raw = raw.get("market_pricing", {})
     priority_raw = raw.get("priority", {})
+    deal_raw = raw.get("deal_scoring", {})
     codex_env = os.getenv("DEAL_RADAR_CODEX_ENABLED", "").strip().casefold()
     config = AppConfig(
         database_path=raw.get("database_path", "data/deal_radar.sqlite3"),
@@ -394,7 +569,13 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
         market_pricing=MarketPricingConfig(
             enabled=bool(market_raw.get("enabled", True)),
             sources=[str(item) for item in market_raw.get("sources", ["bazos_cz", "kleinanzeigen_de", "marktplaats_nl", "buycycle_eu"])],
-            quick_sale_discount=float(market_raw.get("quick_sale_discount", 0.15)),
+            quick_sale_discount=(
+                _env_float(
+                    "QUICK_SALE_DISCOUNT_PERCENT",
+                    float(market_raw.get("quick_sale_discount", 0.15)) * 100,
+                )
+                / 100
+            ),
             max_foreign_markets_per_model=int(market_raw.get("max_foreign_markets_per_model", 2)),
             minimum_unique_comparables_before_fallback=int(market_raw.get("minimum_unique_comparables_before_fallback", 3)),
             foreign_market_disagreement_threshold=float(market_raw.get("foreign_market_disagreement_threshold", 0.30)),
@@ -462,6 +643,139 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
                 **_default_priority_weights(),
                 **{str(key): int(value) for key, value in priority_raw.get("weights", {}).items()},
             },
+        ),
+        deal_scoring=DealScoringConfig(
+            enabled=_env_bool("DEAL_SCORING_ENABLED", bool(deal_raw.get("enabled", True))),
+            algorithm_version=str(deal_raw.get("algorithm_version", "2.2.0")),
+            risk_reserve_percent=_env_float(
+                "RISK_RESERVE_PERCENT",
+                float(deal_raw.get("risk_reserve_percent", 10)),
+            ),
+            hot_min_profit_czk=_env_float(
+                "HOT_MIN_PROFIT_CZK",
+                float(deal_raw.get("hot_min_profit_czk", 4000)),
+            ),
+            hot_min_roi_percent=_env_float(
+                "HOT_MIN_ROI_PERCENT",
+                float(deal_raw.get("hot_min_roi_percent", 20)),
+            ),
+            interesting_min_roi_percent=_env_float(
+                "INTERESTING_MIN_ROI_PERCENT",
+                float(deal_raw.get("interesting_min_roi_percent", 15)),
+            ),
+            high_roi_percent=_env_float(
+                "HIGH_ROI_PERCENT",
+                float(deal_raw.get("high_roi_percent", 100)),
+            ),
+            hot_min_liquidity_score=int(
+                _env_float(
+                    "HOT_MIN_LIQUIDITY_SCORE",
+                    float(deal_raw.get("hot_min_liquidity_score", 50)),
+                )
+            ),
+            hot_min_confidence_score=int(
+                _env_float(
+                    "HOT_MIN_CONFIDENCE_SCORE",
+                    float(deal_raw.get("hot_min_confidence_score", 50)),
+                )
+            ),
+            manual_review_on_low_confidence=_env_bool(
+                "MANUAL_REVIEW_MAX_LOW_CONFIDENCE",
+                bool(deal_raw.get("manual_review_on_low_confidence", True)),
+            ),
+            telegram_send_hot=_env_bool(
+                "TELEGRAM_SEND_HOT",
+                bool(deal_raw.get("telegram_send_hot", True)),
+            ),
+            telegram_send_interesting=_env_bool(
+                "TELEGRAM_SEND_INTERESTING",
+                bool(deal_raw.get("telegram_send_interesting", True)),
+            ),
+            telegram_send_manual_review=_env_bool(
+                "TELEGRAM_SEND_MANUAL_REVIEW",
+                bool(deal_raw.get("telegram_send_manual_review", True)),
+            ),
+            telegram_send_low_priority=_env_bool(
+                "TELEGRAM_SEND_LOW_PRIORITY",
+                bool(deal_raw.get("telegram_send_low_priority", False)),
+            ),
+            telegram_send_reject=_env_bool(
+                "TELEGRAM_SEND_REJECT",
+                bool(deal_raw.get("telegram_send_reject", False)),
+            ),
+            liquidity_high_min_score=int(deal_raw.get("liquidity_high_min_score", 70)),
+            liquidity_medium_min_score=int(deal_raw.get("liquidity_medium_min_score", 50)),
+            liquidity_exact_points=int(deal_raw.get("liquidity_exact_points", 12)),
+            liquidity_close_points=int(deal_raw.get("liquidity_close_points", 8)),
+            liquidity_family_points=int(deal_raw.get("liquidity_family_points", 4)),
+            liquidity_component_points=int(deal_raw.get("liquidity_component_points", 2)),
+            liquidity_source_points=int(deal_raw.get("liquidity_source_points", 5)),
+            liquidity_source_count_cap=int(deal_raw.get("liquidity_source_count_cap", 4)),
+            liquidity_czech_bonus=int(deal_raw.get("liquidity_czech_bonus", 10)),
+            estimated_days_high=int(deal_raw.get("estimated_days_high", 21)),
+            estimated_days_medium=int(deal_raw.get("estimated_days_medium", 45)),
+            estimated_days_low=int(deal_raw.get("estimated_days_low", 75)),
+            confidence_scores={
+                **DealScoringConfig().confidence_scores,
+                **{str(key): int(value) for key, value in deal_raw.get("confidence_scores", {}).items()},
+            },
+            minimum_identity_confidence=float(deal_raw.get("minimum_identity_confidence", 0.55)),
+            price_outlier_discount_percent=float(
+                deal_raw.get("price_outlier_discount_percent", 80)
+            ),
+            profit_score_target_czk=float(deal_raw.get("profit_score_target_czk", 8000)),
+            roi_score_target_percent=float(deal_raw.get("roi_score_target_percent", 100)),
+            risk_penalty_per_flag=float(deal_raw.get("risk_penalty_per_flag", 20)),
+            score_weights={
+                **_default_deal_score_weights(),
+                **{str(key): float(value) for key, value in deal_raw.get("score_weights", {}).items()},
+            },
+            condition_scores={
+                **DealScoringConfig().condition_scores,
+                **{str(key): float(value) for key, value in deal_raw.get("condition_scores", {}).items()},
+            },
+            positive_condition_terms=[
+                str(value)
+                for value in deal_raw.get(
+                    "positive_condition_terms",
+                    DealScoringConfig().positive_condition_terms,
+                )
+            ],
+            service_required_terms=[
+                str(value)
+                for value in deal_raw.get(
+                    "service_required_terms",
+                    DealScoringConfig().service_required_terms,
+                )
+            ],
+            problem_condition_terms=[
+                str(value)
+                for value in deal_raw.get(
+                    "problem_condition_terms",
+                    DealScoringConfig().problem_condition_terms,
+                )
+            ],
+            critical_valuation_statuses=[
+                str(value)
+                for value in deal_raw.get(
+                    "critical_valuation_statuses",
+                    DealScoringConfig().critical_valuation_statuses,
+                )
+            ],
+            critical_warning_terms=[
+                str(value)
+                for value in deal_raw.get(
+                    "critical_warning_terms",
+                    DealScoringConfig().critical_warning_terms,
+                )
+            ],
+            manual_review_risk_terms=[
+                str(value)
+                for value in deal_raw.get(
+                    "manual_review_risk_terms",
+                    DealScoringConfig().manual_review_risk_terms,
+                )
+            ],
         ),
     )
     config.validate()

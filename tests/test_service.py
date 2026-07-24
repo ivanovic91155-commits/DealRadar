@@ -3,9 +3,16 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from deal_radar.config import AppConfig, RetailConfig, SearchProfile, TelegramConfig
+from deal_radar.config import (
+    AppConfig,
+    DealScoringConfig,
+    MarketPricingConfig,
+    RetailConfig,
+    SearchProfile,
+    TelegramConfig,
+)
 from deal_radar.bike_identity import identify_bike
-from deal_radar.models import Listing, Valuation
+from deal_radar.models import Listing, MarketValuation, Valuation
 from deal_radar.pricing import valuation_cache_key
 from deal_radar.service import DealRadarService
 
@@ -47,6 +54,81 @@ def make_listing(external_id: str, minutes: int) -> Listing:
 
 
 class ServiceBootstrapTest(unittest.TestCase):
+    def test_stage_2_2_reuses_single_stage_2_1_result_and_persists_deal(self) -> None:
+        class MarketFinder:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def find(self, item, identity, new_valuation=None):
+                self.calls += 1
+                return MarketValuation(
+                    listing_source=item.source,
+                    listing_external_id=item.external_id,
+                    market_price_czk=20000,
+                    quick_sale_price_czk=17000,
+                    price_low_czk=18000,
+                    price_high_czk=22000,
+                    confidence="medium",
+                    valuation_method="weighted_median",
+                    status="market_price_found",
+                    comparables_total=3,
+                    comparables_unique=3,
+                    exact_comparables=3,
+                    cz_comparables=3,
+                    countries_used=["CZ"],
+                    sources_used=["bazos_cz"],
+                )
+
+        with TemporaryDirectory() as directory:
+            config = AppConfig(
+                database_path=str(Path(directory) / "state.sqlite3"),
+                bootstrap_mode="send_all",
+                profiles=[
+                    SearchProfile(
+                        name="test",
+                        rss_url="https://sport.bazos.cz/rss.php?hledat=kolo",
+                    )
+                ],
+                telegram=TelegramConfig(bot_token="test", chat_id="1"),
+                retail=RetailConfig(enabled=False),
+                market_pricing=MarketPricingConfig(enabled=True),
+                deal_scoring=DealScoringConfig(enabled=True),
+            )
+            item = make_listing("stage22", 1)
+            item.description = "Kolo je po servisu, ve velmi dobrem stavu a bez investic."
+            item.price_czk = 10000
+            item.price_amount = 10000
+            finder = MarketFinder()
+            service = DealRadarService(config)
+            service.sources = [FakeSource([item])]
+            service._market_finder = lambda: finder  # type: ignore[method-assign]
+            telegram = FakeTelegram()
+            try:
+                first = service.process_once(telegram)
+                second = service.process_once(telegram)
+                saved = service.storage.get_latest_deal_evaluation("bazos", "stage22")
+                saved_analysis = service.storage.get_analysis("bazos", "stage22")
+                self.assertEqual(finder.calls, 1)
+                self.assertEqual(first["deal_hot"], 1)
+                self.assertEqual(first["sent"], 1)
+                self.assertEqual(second["new"], 0)
+                self.assertEqual(telegram.sent, ["stage22"])
+                self.assertEqual(saved.status if saved else None, "HOT")
+                self.assertEqual(
+                    saved_analysis.deal_evaluation.status
+                    if saved_analysis and saved_analysis.deal_evaluation
+                    else None,
+                    "HOT",
+                )
+                self.assertEqual(
+                    service.storage.connection.execute(
+                        "SELECT COUNT(*) FROM deal_evaluations"
+                    ).fetchone()[0],
+                    1,
+                )
+            finally:
+                service.close()
+
     def test_confirmed_cross_source_duplicate_sends_only_canonical_and_keeps_both(self) -> None:
         class Finder:
             def identify(self, listing):

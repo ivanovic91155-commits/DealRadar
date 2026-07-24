@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from deal_radar.config import AppConfig
 from deal_radar.bike_identity import identify_listing
+from deal_radar.deal_scoring import DealEvaluator, select_deal_notifications
 from deal_radar.exchange_rates import ExchangeRateProvider
 from deal_radar.http import get_bytes
 from deal_radar.market_pricing import MarketPriceEngine
@@ -391,6 +392,22 @@ class DealRadarService:
             analyzed[listing.key] = (listing, analysis)
             self.storage.save_analysis(listing, analysis)
 
+        if self.config.deal_scoring.enabled:
+            evaluator = DealEvaluator(self.config.deal_scoring)
+            for listing, analysis in analyzed.values():
+                try:
+                    deal_evaluation = evaluator.evaluate(
+                        listing,
+                        analysis,
+                        self.storage.get_deal_costs(listing),
+                    )
+                except Exception as exc:
+                    LOGGER.exception("Deal evaluation failed for %s; cycle continues", listing.key)
+                    deal_evaluation = evaluator.error_result(listing, exc)
+                analysis.deal_evaluation = deal_evaluation
+                self.storage.save_deal_evaluation(deal_evaluation)
+                self.storage.save_analysis(listing, analysis)
+
         now = datetime.now(UTC)
         notification_pool: list[tuple[Listing, ListingAnalysis, float]] = []
         for key, (listing, analysis) in analyzed.items():
@@ -401,7 +418,16 @@ class DealRadarService:
             first_seen = self.storage.first_seen_at(listing)
             age_hours = max(0.0, (now - first_seen.astimezone(UTC)).total_seconds() / 3600)
             notification_pool.append((listing, analysis, age_hours))
-        selected = select_notifications(notification_pool, self.config.priority)
+        if self.config.deal_scoring.enabled:
+            selected = select_deal_notifications(
+                notification_pool,
+                self.config.deal_scoring,
+                max_cards=self.config.priority.max_telegram_cards,
+                manual_review_reserved_slots=self.config.priority.manual_review_reserved_slots,
+                max_age_hours=self.config.priority.individual_notification_max_age_hours,
+            )
+        else:
+            selected = select_notifications(notification_pool, self.config.priority)
         selected_keys = {listing.key for listing, _ in selected}
 
         sent = 0
@@ -419,10 +445,13 @@ class DealRadarService:
                 sent += 1
                 valuation = analysis.valuation
                 LOGGER.info(
-                    "Selected %s score=%d class=%s confidence=%s cache=%s sources=%d reasons=%s",
+                    "Selected %s score=%d class=%s deal_status=%s deal_score=%s "
+                    "confidence=%s cache=%s sources=%d reasons=%s",
                     listing.key,
                     analysis.preliminary_priority_score,
                     analysis.priority_class,
+                    analysis.deal_evaluation.status if analysis.deal_evaluation else "disabled",
+                    analysis.deal_evaluation.deal_score if analysis.deal_evaluation else "n/a",
                     analysis.analysis_confidence,
                     analysis.cache_used,
                     valuation.independent_source_count if valuation else 0,
@@ -443,6 +472,14 @@ class DealRadarService:
             elif age_hours > self.config.priority.individual_notification_max_age_hours:
                 status, reason = "expired", "individual_notification_too_old"
                 expired += 1
+            elif self.config.deal_scoring.enabled and analysis.deal_evaluation is not None:
+                deal_status = analysis.deal_evaluation.status
+                if deal_status == "LOW_PRIORITY":
+                    status, reason = "low_priority", "deal_status_low_priority_not_sent"
+                elif deal_status == "REJECT":
+                    status, reason = "excluded", "deal_status_reject_not_sent"
+                else:
+                    status, reason = "not_selected", "deal_notification_slots_or_policy"
             elif analysis.priority_class == "low_priority":
                 status, reason = "low_priority", "score_below_manual_review_threshold"
             else:
@@ -456,6 +493,7 @@ class DealRadarService:
         two_sources = sum(bool(item.valuation and item.valuation.independent_source_count == 2) for item in final_analyses)
         three_plus = sum(bool(item.valuation and item.valuation.independent_source_count >= 3) for item in final_analyses)
         market_values = [item.market_valuation for item in final_analyses if item.market_valuation]
+        deal_values = [item.deal_evaluation for item in final_analyses if item.deal_evaluation]
         stats = {
             "fetched": len(listings),
             "new": inserted,
@@ -486,10 +524,16 @@ class DealRadarService:
             "market_cz_only": sum(item.countries_used == ["CZ"] for item in market_values),
             "market_foreign": sum(any(country != "CZ" for country in item.countries_used) for item in market_values),
             "market_duplicates_removed": sum(item.duplicates_removed for item in market_values),
+            "deal_evaluated": len(deal_values),
+            "deal_hot": sum(item.status == "HOT" for item in deal_values),
+            "deal_interesting": sum(item.status == "INTERESTING" for item in deal_values),
+            "deal_manual_review": sum(item.status == "MANUAL_REVIEW" for item in deal_values),
+            "deal_low_priority": sum(item.status == "LOW_PRIORITY" for item in deal_values),
+            "deal_reject": sum(item.status == "REJECT" for item in deal_values),
         }
         for source, count in market_http_requests.items():
             stats[f"market_http_{source}"] = count
-        LOGGER.info("Stage 2.1 cycle funnel: %s", stats)
+        LOGGER.info("Stage 2.2 cycle funnel: %s", stats)
         return stats
 
     def run_forever(self) -> None:

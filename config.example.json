@@ -173,6 +173,103 @@
       "minimum_model_pairs": 10
     }
   },
+  "deal_scoring": {
+    "enabled": true,
+    "algorithm_version": "2.2.0",
+    "risk_reserve_percent": 10,
+    "hot_min_profit_czk": 4000,
+    "hot_min_roi_percent": 20,
+    "interesting_min_roi_percent": 15,
+    "high_roi_percent": 100,
+    "hot_min_liquidity_score": 50,
+    "hot_min_confidence_score": 50,
+    "manual_review_on_low_confidence": true,
+    "telegram_send_hot": true,
+    "telegram_send_interesting": true,
+    "telegram_send_manual_review": true,
+    "telegram_send_low_priority": false,
+    "telegram_send_reject": false,
+    "liquidity_high_min_score": 70,
+    "liquidity_medium_min_score": 50,
+    "liquidity_exact_points": 12,
+    "liquidity_close_points": 8,
+    "liquidity_family_points": 4,
+    "liquidity_component_points": 2,
+    "liquidity_source_points": 5,
+    "liquidity_source_count_cap": 4,
+    "liquidity_czech_bonus": 10,
+    "estimated_days_high": 21,
+    "estimated_days_medium": 45,
+    "estimated_days_low": 75,
+    "confidence_scores": {
+      "high": 85,
+      "medium": 65,
+      "low": 35
+    },
+    "minimum_identity_confidence": 0.55,
+    "price_outlier_discount_percent": 80,
+    "profit_score_target_czk": 8000,
+    "roi_score_target_percent": 100,
+    "risk_penalty_per_flag": 20,
+    "score_weights": {
+      "profit": 25,
+      "roi": 25,
+      "liquidity": 20,
+      "confidence": 15,
+      "condition": 10,
+      "risk": 5
+    },
+    "condition_scores": {
+      "excellent": 100,
+      "good": 85,
+      "unknown": 50,
+      "service_required": 20,
+      "problematic": 10,
+      "contradictory": 10
+    },
+    "positive_condition_terms": [
+      "bez investic",
+      "po servisu",
+      "pravidelny servis",
+      "top stav",
+      "perfektni stav",
+      "velmi dobry stav",
+      "vyborny stav",
+      "ready to ride",
+      "fully serviced"
+    ],
+    "service_required_terms": [
+      "nutny servis",
+      "potrebuje servis",
+      "pred servisem",
+      "servis vidlice",
+      "servis tlumice",
+      "vymena retezu",
+      "nutna vymena",
+      "needs service",
+      "requires service",
+      "service required"
+    ],
+    "problem_condition_terms": [
+      "na opravu",
+      "nepojizdne",
+      "poskozene",
+      "praskly ram",
+      "nefunkcni",
+      "repair needed",
+      "not working",
+      "damaged frame"
+    ],
+    "manual_review_risk_terms": [
+      "модель не подтверждена",
+      "цена подозрительно низкая",
+      "числовая цена продавца отсутствует",
+      "требуется ручная проверка",
+      "model is ambiguous",
+      "suspiciously low price",
+      "manual review required"
+    ]
+  },
   "priority": {
     "urgent_min_score": 80,
     "interesting_min_score": 60,

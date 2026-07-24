@@ -328,6 +328,70 @@ class MarketValuation:
 
 
 @dataclass(slots=True)
+class DealCosts:
+    acquisition_costs_czk: float = 0.0
+    logistics_costs_czk: float = 0.0
+    platform_fees_czk: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "DealCosts":
+        allowed = {item.name for item in fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in allowed})
+
+
+@dataclass(slots=True)
+class DealEvaluation:
+    listing_source: str
+    listing_external_id: str
+    algorithm_version: str
+    status: str
+    purchase_price_czk: float | None = None
+    acquisition_costs_czk: float = 0.0
+    logistics_costs_czk: float = 0.0
+    platform_fees_czk: float = 0.0
+    base_investment_czk: float | None = None
+    risk_reserve_percent: float = 10.0
+    risk_reserve_czk: float | None = None
+    total_investment_czk: float | None = None
+    market_median_czk: float | None = None
+    quick_sale_price_czk: float | None = None
+    net_profit_czk: float | None = None
+    roi_percent: float | None = None
+    liquidity_score: int | None = None
+    liquidity_level: str = "unknown"
+    estimated_days_to_sell: int | None = None
+    confidence_score: int | None = None
+    confidence_level: str = "low"
+    condition: str = "unknown"
+    market_scope: str = "unknown"
+    comparable_count: int = 0
+    source_count: int = 0
+    valuation_status: str = "missing"
+    market_valuation_ref: str = ""
+    deal_score: float = 0.0
+    score_components: dict[str, float] = field(default_factory=dict)
+    reasons: list[str] = field(default_factory=list)
+    flags: list[str] = field(default_factory=list)
+    missing_fields: list[str] = field(default_factory=list)
+    explanation: str = ""
+    manual_review_question: str = ""
+    config_snapshot: dict[str, Any] = field(default_factory=dict)
+    input_fingerprint: str = ""
+    calculated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "DealEvaluation":
+        allowed = {item.name for item in fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in allowed})
+
+
+@dataclass(slots=True)
 class ListingAnalysis:
     preliminary_priority_score: int
     priority_class: str
@@ -343,6 +407,7 @@ class ListingAnalysis:
     notification_reason: str = ""
     duplicate_alternatives: list[dict[str, str]] = field(default_factory=list)
     market_valuation: MarketValuation | None = None
+    deal_evaluation: DealEvaluation | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -358,5 +423,7 @@ class ListingAnalysis:
             copy["used_comparables"] = UsedComparables.from_dict(copy["used_comparables"])
         if isinstance(copy.get("market_valuation"), dict):
             copy["market_valuation"] = MarketValuation.from_dict(copy["market_valuation"])
+        if isinstance(copy.get("deal_evaluation"), dict):
+            copy["deal_evaluation"] = DealEvaluation.from_dict(copy["deal_evaluation"])
         allowed = {item.name for item in fields(cls)}
         return cls(**{key: value for key, value in copy.items() if key in allowed})

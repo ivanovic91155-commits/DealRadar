@@ -31,6 +31,19 @@ CONFIDENCE_LABELS = {
     "insufficient": "недостаточная",
     "none": "недостаточная",
 }
+DEAL_STATUS_LABELS = {
+    "HOT": "🔥 HOT",
+    "INTERESTING": "✅ INTERESTING",
+    "MANUAL_REVIEW": "🟡 MANUAL REVIEW",
+    "LOW_PRIORITY": "⚪ LOW PRIORITY",
+    "REJECT": "⛔ REJECT",
+}
+LIQUIDITY_LABELS = {
+    "high": "высокая",
+    "medium": "средняя",
+    "low": "низкая",
+    "unknown": "не определена",
+}
 
 
 def format_czk(value: int | None) -> str:
@@ -87,6 +100,7 @@ def _analysis_card_text(
     identity = analysis.identity
     valuation = analysis.valuation
     market_valuation = analysis.market_valuation
+    deal_evaluation = analysis.deal_evaluation
     used = analysis.used_comparables
     priority = PRIORITY_LABELS.get(analysis.priority_class, analysis.priority_class)
     marketplace = SOURCE_LABELS.get(listing.source, listing.source)
@@ -95,9 +109,16 @@ def _analysis_card_text(
         lines.append(STAGE_1_2_DIAGNOSTIC_HEADER.rstrip())
     elif diagnostic_header == "stage_2_1":
         lines.append(STAGE_2_1_DIAGNOSTIC_HEADER.rstrip())
+    if deal_evaluation:
+        lines.append(
+            f"<b>{DEAL_STATUS_LABELS.get(deal_evaluation.status, deal_evaluation.status)}"
+            f" — {deal_evaluation.deal_score:.0f}/100</b>"
+        )
+        lines.append(f"Предварительный приоритет: {priority} · {analysis.preliminary_priority_score}/100")
+    else:
+        lines.append(f"<b>{priority} — {analysis.preliminary_priority_score}/100</b>")
     lines.extend(
         [
-            f"<b>{priority} — {analysis.preliminary_priority_score}/100</b>",
             f"🚲 {html.escape(marketplace)} · <b>{html.escape(listing.title[:180])}</b>",
             f"💰 Цена продавца: <b>{format_seller_price(listing)}</b>",
         ]
@@ -114,6 +135,45 @@ def _analysis_card_text(
         url = html.escape(alternative.get("url", ""), quote=True)
         if url:
             lines.append(f'🔁 <a href="{url}">Также найдено на {html.escape(source)}</a>')
+
+    if deal_evaluation:
+        liquidity = LIQUIDITY_LABELS.get(
+            deal_evaluation.liquidity_level,
+            deal_evaluation.liquidity_level,
+        )
+        if deal_evaluation.estimated_days_to_sell is not None:
+            liquidity += f", ориентир до {deal_evaluation.estimated_days_to_sell} дней"
+        confidence = CONFIDENCE_LABELS.get(
+            deal_evaluation.confidence_level,
+            deal_evaluation.confidence_level,
+        )
+        if deal_evaluation.confidence_score is not None:
+            confidence += f" ({deal_evaluation.confidence_score}/100)"
+        lines.extend(
+            [
+                "",
+                "<b>💼 Оценка сделки</b>",
+                f"Статус: <b>{html.escape(deal_evaluation.status)}</b>",
+            ]
+        )
+        if deal_evaluation.status == "MANUAL_REVIEW":
+            lines.append(
+                f"⚠️ Нужна ручная проверка: {html.escape(deal_evaluation.manual_review_question)}"
+            )
+        lines.extend(
+            [
+                f"Покупка: {format_czk(round(deal_evaluation.purchase_price_czk)) if deal_evaluation.purchase_price_czk is not None else 'нет данных'}",
+                f"Рыночная медиана: {format_czk(round(deal_evaluation.market_median_czk)) if deal_evaluation.market_median_czk is not None else 'нет данных'}",
+                f"Быстрая продажа: {format_czk(round(deal_evaluation.quick_sale_price_czk)) if deal_evaluation.quick_sale_price_czk is not None else 'нет данных'}",
+                f"Резерв риска: {format_czk(round(deal_evaluation.risk_reserve_czk)) if deal_evaluation.risk_reserve_czk is not None else 'нет данных'}",
+                f"Полное вложение: {format_czk(round(deal_evaluation.total_investment_czk)) if deal_evaluation.total_investment_czk is not None else 'нет данных'}",
+                f"Чистая прибыль: {format_czk(round(deal_evaluation.net_profit_czk)) if deal_evaluation.net_profit_czk is not None else 'нет данных'}",
+                f"ROI: {deal_evaluation.roi_percent:.1f}%" if deal_evaluation.roi_percent is not None else "ROI: нет данных",
+                f"Ликвидность: {html.escape(liquidity)}",
+                f"Уверенность: {html.escape(confidence)}",
+                f"Почему: {html.escape(deal_evaluation.explanation)}",
+            ]
+        )
 
     if market_valuation:
         lines.extend(["", "<b>📊 Оценка рынка</b>"])
@@ -140,6 +200,13 @@ def _analysis_card_text(
                     "Это запрашиваемые цены продавцов, а не подтверждённые цены реальных продаж.",
                 ]
             )
+            comparable_links = [
+                f'<a href="{html.escape(item.url, quote=True)}">{html.escape(item.title[:45])}</a>'
+                for item in market_valuation.comparables[:2]
+                if item.url
+            ]
+            if comparable_links:
+                lines.append("Лучшие аналоги: " + " · ".join(comparable_links))
             if market_valuation.status == "foreign_only_estimate":
                 countries = ", ".join(market_valuation.countries_used) or "зарубежному рынку"
                 lines.append(

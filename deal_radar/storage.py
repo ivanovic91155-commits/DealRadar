@@ -20,6 +20,8 @@ from deal_radar.duplicates import (
     text_similarity,
 )
 from deal_radar.models import (
+    DealCosts,
+    DealEvaluation,
     Listing,
     ListingAnalysis,
     MarketComparable,
@@ -203,6 +205,55 @@ class Storage:
                 calculated_at TEXT NOT NULL,
                 PRIMARY KEY (country, bike_type)
             );
+            CREATE TABLE IF NOT EXISTS deal_cost_overrides (
+                listing_source TEXT NOT NULL,
+                listing_external_id TEXT NOT NULL,
+                acquisition_costs_czk REAL NOT NULL DEFAULT 0,
+                logistics_costs_czk REAL NOT NULL DEFAULT 0,
+                platform_fees_czk REAL NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (listing_source, listing_external_id)
+            );
+            CREATE TABLE IF NOT EXISTS deal_evaluations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                listing_source TEXT NOT NULL,
+                listing_external_id TEXT NOT NULL,
+                algorithm_version TEXT NOT NULL,
+                input_fingerprint TEXT NOT NULL,
+                calculated_at TEXT NOT NULL,
+                purchase_price_czk REAL,
+                acquisition_costs_czk REAL NOT NULL,
+                logistics_costs_czk REAL NOT NULL,
+                platform_fees_czk REAL NOT NULL,
+                base_investment_czk REAL,
+                risk_reserve_percent REAL NOT NULL,
+                risk_reserve_czk REAL,
+                total_investment_czk REAL,
+                market_median_czk REAL,
+                quick_sale_price_czk REAL,
+                net_profit_czk REAL,
+                roi_percent REAL,
+                deal_score REAL NOT NULL,
+                score_components_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                reasons_json TEXT NOT NULL,
+                flags_json TEXT NOT NULL,
+                liquidity_score INTEGER,
+                liquidity_level TEXT NOT NULL,
+                confidence_score INTEGER,
+                confidence_level TEXT NOT NULL,
+                condition TEXT NOT NULL,
+                market_scope TEXT NOT NULL,
+                market_valuation_ref TEXT NOT NULL,
+                config_snapshot_json TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                UNIQUE (listing_source, listing_external_id, input_fingerprint)
+            );
+            CREATE INDEX IF NOT EXISTS deal_evaluations_listing_idx
+            ON deal_evaluations(listing_source, listing_external_id, id DESC);
+            CREATE INDEX IF NOT EXISTS deal_evaluations_status_score_idx
+            ON deal_evaluations(status, deal_score DESC);
             """
         )
         feedback_columns = {
@@ -899,6 +950,119 @@ class Storage:
                     """,
                     values,
                 )
+
+    def get_deal_costs(self, listing: Listing) -> DealCosts:
+        row = self.connection.execute(
+            """
+            SELECT acquisition_costs_czk, logistics_costs_czk, platform_fees_czk
+            FROM deal_cost_overrides
+            WHERE listing_source = ? AND listing_external_id = ?
+            """,
+            (listing.source, listing.external_id),
+        ).fetchone()
+        if row is None:
+            return DealCosts()
+        return DealCosts(
+            acquisition_costs_czk=float(row["acquisition_costs_czk"]),
+            logistics_costs_czk=float(row["logistics_costs_czk"]),
+            platform_fees_czk=float(row["platform_fees_czk"]),
+        )
+
+    def set_deal_costs(self, listing: Listing, costs: DealCosts) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO deal_cost_overrides (
+                    listing_source, listing_external_id, acquisition_costs_czk,
+                    logistics_costs_czk, platform_fees_czk, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(listing_source, listing_external_id) DO UPDATE SET
+                    acquisition_costs_czk = excluded.acquisition_costs_czk,
+                    logistics_costs_czk = excluded.logistics_costs_czk,
+                    platform_fees_czk = excluded.platform_fees_czk,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    listing.source,
+                    listing.external_id,
+                    costs.acquisition_costs_czk,
+                    costs.logistics_costs_czk,
+                    costs.platform_fees_czk,
+                    _now(),
+                ),
+            )
+
+    def save_deal_evaluation(self, evaluation: DealEvaluation) -> bool:
+        payload = json.dumps(evaluation.to_dict(), ensure_ascii=False, sort_keys=True)
+        with self.connection:
+            cursor = self.connection.execute(
+                """
+                INSERT OR IGNORE INTO deal_evaluations (
+                    listing_source, listing_external_id, algorithm_version,
+                    input_fingerprint, calculated_at, purchase_price_czk,
+                    acquisition_costs_czk, logistics_costs_czk, platform_fees_czk,
+                    base_investment_czk, risk_reserve_percent, risk_reserve_czk,
+                    total_investment_czk, market_median_czk, quick_sale_price_czk,
+                    net_profit_czk, roi_percent, deal_score, score_components_json,
+                    status, explanation, reasons_json, flags_json, liquidity_score,
+                    liquidity_level, confidence_score, confidence_level, condition,
+                    market_scope, market_valuation_ref, config_snapshot_json, data_json
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                (
+                    evaluation.listing_source,
+                    evaluation.listing_external_id,
+                    evaluation.algorithm_version,
+                    evaluation.input_fingerprint,
+                    evaluation.calculated_at,
+                    evaluation.purchase_price_czk,
+                    evaluation.acquisition_costs_czk,
+                    evaluation.logistics_costs_czk,
+                    evaluation.platform_fees_czk,
+                    evaluation.base_investment_czk,
+                    evaluation.risk_reserve_percent,
+                    evaluation.risk_reserve_czk,
+                    evaluation.total_investment_czk,
+                    evaluation.market_median_czk,
+                    evaluation.quick_sale_price_czk,
+                    evaluation.net_profit_czk,
+                    evaluation.roi_percent,
+                    evaluation.deal_score,
+                    json.dumps(evaluation.score_components, ensure_ascii=False, sort_keys=True),
+                    evaluation.status,
+                    evaluation.explanation,
+                    json.dumps(evaluation.reasons, ensure_ascii=False),
+                    json.dumps(evaluation.flags, ensure_ascii=False),
+                    evaluation.liquidity_score,
+                    evaluation.liquidity_level,
+                    evaluation.confidence_score,
+                    evaluation.confidence_level,
+                    evaluation.condition,
+                    evaluation.market_scope,
+                    evaluation.market_valuation_ref,
+                    json.dumps(evaluation.config_snapshot, ensure_ascii=False, sort_keys=True),
+                    payload,
+                ),
+            )
+        return bool(cursor.rowcount)
+
+    def get_latest_deal_evaluation(
+        self,
+        source: str,
+        external_id: str,
+    ) -> DealEvaluation | None:
+        row = self.connection.execute(
+            """
+            SELECT data_json FROM deal_evaluations
+            WHERE listing_source = ? AND listing_external_id = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (source, external_id),
+        ).fetchone()
+        return DealEvaluation.from_dict(json.loads(row["data_json"])) if row else None
 
     def get_market_lookup_cache(self, cache_key: str) -> tuple[str, list[MarketComparable]] | None:
         row = self.connection.execute(
