@@ -313,6 +313,19 @@ def has_accessory_terms(text: str) -> bool:
     return any(normalize_text(word) in normalized for word in ACCESSORY_WORDS)
 
 
+def hard_filter_reason(
+    listing: Listing,
+    identity: BikeIdentity | None = None,
+) -> str:
+    """Return the existing exclusion-policy reason for a listing, if any."""
+    if has_accessory_terms(listing.title):
+        return "hard_filter_accessory_or_part"
+    resolved_identity = identity or identify_listing(listing)
+    if resolved_identity.audience == "kids":
+        return "hard_filter_kids_bike"
+    return ""
+
+
 def has_used_terms(text: str) -> bool:
     normalized = normalize_text(text)
     return any(word in normalized for word in USED_WORDS)

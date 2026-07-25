@@ -88,6 +88,23 @@ class PriorityScoreTest(unittest.TestCase):
         part = build_analysis(listing(title="Trek Marlin frame only"), PriorityConfig(), now=NOW)
         self.assertEqual(part.priority_class, "excluded")
 
+    def test_kids_bike_is_excluded_before_market_lookup(self) -> None:
+        result = build_analysis(
+            listing(title="Dětské kolo Canyon Offspring AL 16"),
+            PriorityConfig(),
+            now=NOW,
+        )
+        self.assertEqual(result.priority_class, "excluded")
+        self.assertEqual(result.notification_status, "excluded")
+        self.assertEqual(result.notification_reason, "hard_filter_kids_bike")
+        self.assertEqual(
+            select_lookup_candidates(
+                [(listing(title="Dětský Author Junior"), result)],
+                1,
+            ),
+            [],
+        )
+
     def test_suspiciously_low_price_is_manual_review_not_rejected(self) -> None:
         result = build_analysis(listing(price=3000), PriorityConfig(), valuation=valuation(30000), now=NOW)
         self.assertEqual(result.priority_class, "manual_review")

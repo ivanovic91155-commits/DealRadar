@@ -9,6 +9,7 @@ from deal_radar.config import DealScoringConfig, load_config
 from deal_radar.deal_scoring import (
     DealEvaluator,
     calculate_liquidity,
+    detect_condition,
     select_deal_notifications,
 )
 from deal_radar.models import (
@@ -160,6 +161,117 @@ class DealFormulaAndStatusTest(unittest.TestCase):
         self.assertEqual(result.condition, "service_required")
         self.assertIn("service_required", result.flags)
 
+    def test_completed_or_unnecessary_service_phrases_are_positive_condition(self) -> None:
+        phrases = (
+            "po servisu",
+            "nově servisováno",
+            "bez nutnosti servisu",
+            "servis není potřeba",
+            "bez dalších investic",
+            "připraveno k jízdě",
+        )
+        for index, phrase in enumerate(phrases):
+            with self.subTest(phrase=phrase):
+                item = listing(
+                    f"positive-condition-{index}",
+                    description=f"Kolo je {phrase}.",
+                )
+                condition, flags = detect_condition(item, self.config)
+                self.assertIn(condition, {"good", "excellent"})
+                self.assertNotIn("service_required", flags)
+                self.assertNotIn("condition_unknown", flags)
+
+    def test_clear_czech_positive_condition_phrases_are_recognized(self) -> None:
+        phrases = (
+            "připravené k jízdě",
+            "připravené na okamžité vyjetí",
+            "ihned k použití",
+            "stačí sednout a jet",
+            "jen nasednout a jet",
+            "plně funkční",
+            "vše 100% funkční",
+            "vše funguje na 100 %",
+            "pravidelně servisované",
+            "vše zavčasu servisováno",
+            "v dobrém stavu",
+            "v pěkném stavu",
+            "v ideálním stavu",
+            "v perfektním stavu",
+            "ve výborném stavu",
+            "bezvadný stav",
+            "jako nové",
+            "zachovalé",
+            "udržované",
+        )
+        for index, phrase in enumerate(phrases):
+            with self.subTest(phrase=phrase):
+                item = listing(
+                    f"clear-czech-condition-{index}",
+                    description=f"Kolo je {phrase}.",
+                )
+                condition, flags = detect_condition(item, self.config)
+                self.assertIn(condition, {"good", "excellent"})
+                self.assertNotIn("condition_unknown", flags)
+
+    def test_negated_positive_condition_phrases_are_not_accepted(self) -> None:
+        phrases = (
+            "není plně funkční",
+            "není v dobrém stavu",
+            "nezachovalé",
+            "neudržované",
+        )
+        for index, phrase in enumerate(phrases):
+            with self.subTest(phrase=phrase):
+                item = listing(
+                    f"negated-positive-condition-{index}",
+                    description=f"Kolo je {phrase}.",
+                )
+                condition, flags = detect_condition(item, self.config)
+                self.assertEqual(condition, "unknown")
+                self.assertIn("condition_unknown", flags)
+
+    def test_generic_marketing_phrases_do_not_prove_condition(self) -> None:
+        item = listing(
+            "marketing-only",
+            description="Super kolo, skvělá nabídka, neváhejte.",
+        )
+        condition, flags = detect_condition(item, self.config)
+        self.assertEqual(condition, "unknown")
+        self.assertIn("condition_unknown", flags)
+
+    def test_completed_shock_service_does_not_trigger_service_required(self) -> None:
+        item = listing(
+            "completed-shock-service",
+            description=(
+                "Dělal jsem servis tlumiče a vidlice 21.7.2026. "
+                "Stav je dobrý a kolo je připraveno k jízdě."
+            ),
+        )
+        condition, flags = detect_condition(item, self.config)
+        self.assertEqual(condition, "good")
+        self.assertNotIn("service_required", flags)
+
+    def test_completed_service_does_not_hide_separate_required_service(self) -> None:
+        item = listing(
+            "mixed-service",
+            description=(
+                "Kolo je po servisu, ale nyní potřebuje servis vidlice."
+            ),
+        )
+        condition, flags = detect_condition(item, self.config)
+        self.assertEqual(condition, "contradictory")
+        self.assertIn("service_required", flags)
+        self.assertIn("condition_contradictory", flags)
+
+    def test_negated_completed_service_is_not_treated_as_completed(self) -> None:
+        item = listing(
+            "not-serviced",
+            description="Nedělal jsem servis tlumiče, je potřeba ho provést.",
+        )
+        condition, flags = detect_condition(item, self.config)
+        self.assertEqual(condition, "service_required")
+        self.assertIn("service_required", flags)
+
     def test_existing_manual_review_reason_blocks_hot(self) -> None:
         item = listing("existing-risk")
         item_analysis = analysis(item, market("existing-risk", quick=18000))
@@ -167,6 +279,58 @@ class DealFormulaAndStatusTest(unittest.TestCase):
         result = self.evaluator.evaluate(item, item_analysis)
         self.assertEqual(result.status, "MANUAL_REVIEW")
         self.assertIn("stage_1_2_manual_risk", result.flags)
+
+    def test_stale_batch_analysis_still_rejects_kids_bike(self) -> None:
+        item = listing(
+            "kids-bike",
+            title="Dětské kolo Canyon Offspring AL 16",
+            description="Kolo je po servisu a bez investic.",
+        )
+        stale_analysis = analysis(item, market("kids-bike", quick=18000))
+        stale_analysis.identity.audience = "kids"
+        stale_analysis.priority_class = "interesting_candidate"
+        stale_analysis.notification_status = "awaiting_analysis"
+        result = self.evaluator.evaluate(item, stale_analysis)
+        self.assertEqual(result.status, "REJECT")
+        self.assertIn("existing_hard_filter", result.flags)
+        self.assertIn("hard_filter_kids_bike", result.flags)
+        self.assertIsNotNone(result.net_profit_czk)
+
+    def test_kids_bike_reject_is_not_selected_for_telegram(self) -> None:
+        item = listing(
+            "kids-telegram",
+            title="Dětský Author Junior",
+            description="Kolo je po servisu a bez investic.",
+        )
+        item_analysis = analysis(item, market("kids-telegram", quick=18000))
+        item_analysis.identity.audience = "kids"
+        item_analysis.deal_evaluation = self.evaluator.evaluate(item, item_analysis)
+        selected = select_deal_notifications(
+            [(item, item_analysis, 0.1)],
+            self.config,
+            max_cards=10,
+            manual_review_reserved_slots=2,
+            max_age_hours=6,
+        )
+        self.assertEqual(selected, [])
+
+    def test_informational_market_warning_does_not_block_hot(self) -> None:
+        item = listing("informational-warning")
+        valuation = market("informational-warning", quick=18000)
+        valuation.warnings = [
+            "В Чехии подходящие аналоги не найдены; оценка построена по зарубежному рынку."
+        ]
+        result = self.evaluate(item, valuation)
+        self.assertEqual(result.status, "HOT")
+        self.assertNotIn("critical_market_warning", result.flags)
+
+    def test_critical_market_warning_blocks_hot_for_manual_review(self) -> None:
+        item = listing("critical-warning")
+        valuation = market("critical-warning", quick=18000)
+        valuation.warnings = ["Ambiguous model mismatch requires review."]
+        result = self.evaluate(item, valuation)
+        self.assertEqual(result.status, "MANUAL_REVIEW")
+        self.assertIn("critical_market_warning", result.flags)
 
     def test_hot_financials_with_low_liquidity_are_interesting(self) -> None:
         valuation = market("slow", quick=18000, exact=1)

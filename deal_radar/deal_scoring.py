@@ -4,11 +4,12 @@ import hashlib
 import json
 import logging
 import math
+import re
 import time
 from dataclasses import asdict
 from decimal import Decimal, ROUND_HALF_UP
 
-from deal_radar.bike_identity import has_accessory_terms, normalize_text
+from deal_radar.bike_identity import hard_filter_reason, normalize_text
 from deal_radar.config import DealScoringConfig
 from deal_radar.models import DealCosts, DealEvaluation, Listing, ListingAnalysis, MarketValuation
 
@@ -29,13 +30,57 @@ def _money(value: Decimal) -> float:
 
 
 def _contains_any(text: str, terms: list[str]) -> bool:
-    return any(normalize_text(term) in text for term in terms if normalize_text(term))
+    return any(
+        not _match_is_negated(text, match)
+        for match in _match_ranges(text, terms)
+    )
+
+
+def _match_ranges(text: str, terms: list[str]) -> list[tuple[int, int]]:
+    matches: list[tuple[int, int]] = []
+    for term in terms:
+        normalized_term = normalize_text(term)
+        if not normalized_term:
+            continue
+        start = 0
+        while True:
+            index = text.find(normalized_term, start)
+            if index < 0:
+                break
+            end = index + len(normalized_term)
+            starts_on_boundary = index == 0 or not text[index - 1].isalnum()
+            ends_on_boundary = end == len(text) or not text[end].isalnum()
+            if starts_on_boundary and ends_on_boundary:
+                matches.append((index, end))
+            start = index + 1
+    return matches
+
+
+def _overlaps(left: tuple[int, int], right: tuple[int, int]) -> bool:
+    return left[0] < right[1] and right[0] < left[1]
+
+
+def _match_is_negated(text: str, match: tuple[int, int]) -> bool:
+    prefix = text[max(0, match[0] - 24) : match[0]]
+    return bool(
+        re.search(
+            r"(?:^|\s)(?:ne|neni(?:\s+(?:v|ve))?|not|is\s+not)\s*$",
+            prefix,
+        )
+    )
 
 
 def detect_condition(listing: Listing, config: DealScoringConfig) -> tuple[str, list[str]]:
     text = normalize_text(f"{listing.title} {listing.description}")
-    has_positive = _contains_any(text, config.positive_condition_terms)
-    has_service = _contains_any(text, config.service_required_terms)
+    completed_service_ranges = _match_ranges(text, config.completed_service_terms)
+    service_ranges = _match_ranges(text, config.service_required_terms)
+    has_positive = _contains_any(text, config.positive_condition_terms) or bool(
+        completed_service_ranges
+    )
+    has_service = any(
+        not any(_overlaps(service, completed) for completed in completed_service_ranges)
+        for service in service_ranges
+    )
     has_problem = _contains_any(text, config.problem_condition_terms)
     flags: list[str] = []
     if has_service:
@@ -348,15 +393,23 @@ class DealEvaluator:
             manual_reasons.append("Цена покупки является подозрительно низким рыночным выбросом.")
             flags.append("purchase_price_outlier")
 
+        current_hard_filter = hard_filter_reason(listing, analysis.identity)
         hard_reject = (
+            bool(current_hard_filter)
+            or
             analysis.priority_class == "excluded"
             or analysis.notification_status == "excluded"
-            or has_accessory_terms(listing.title)
         )
         if hard_reject:
             status = "REJECT"
-            reasons.append("Объявление отклонено существующим фильтром релевантности.")
+            reasons.append(
+                "Детский велосипед исключён существующей политикой проекта."
+                if current_hard_filter == "hard_filter_kids_bike"
+                else "Объявление отклонено существующим фильтром релевантности."
+            )
             flags.append("existing_hard_filter")
+            if current_hard_filter:
+                flags.append(current_hard_filter)
         elif net_profit is not None and net_profit <= 0:
             status = "REJECT"
             reasons.append(f"Чистая прибыль {net_profit:.0f} Kč не является положительной.")

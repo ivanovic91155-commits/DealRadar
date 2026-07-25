@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from datetime import UTC, datetime
 
-from deal_radar.bike_identity import has_accessory_terms, identify_listing, normalize_text
+from deal_radar.bike_identity import hard_filter_reason, identify_listing, normalize_text
 from deal_radar.config import PriorityConfig
 from deal_radar.models import BikeIdentity, Listing, ListingAnalysis, UsedComparables, Valuation
 from deal_radar.pricing import discount_percent
@@ -70,9 +70,14 @@ def build_analysis(
     score = 0
     combined = normalize_text(f"{listing.title} {listing.description}")
 
-    hard_reject = has_accessory_terms(listing.title)
+    filter_reason = hard_filter_reason(listing, identity)
+    hard_reject = bool(filter_reason)
     if hard_reject:
-        risks.append("Объявление похоже на запчасть или комплектующую.")
+        risks.append(
+            "Детский велосипед исключён политикой проекта."
+            if filter_reason == "hard_filter_kids_bike"
+            else "Объявление похоже на запчасть или комплектующую."
+        )
 
     if listing.published_at:
         published = listing.published_at
@@ -169,7 +174,7 @@ def build_analysis(
         used_comparables=used_comparables,
         cache_used=cache_used,
         notification_status="excluded" if hard_reject else "awaiting_analysis",
-        notification_reason="hard_filter_accessory_or_part" if hard_reject else "",
+        notification_reason=filter_reason,
     )
 
 

@@ -368,13 +368,50 @@ class DealScoringConfig:
     positive_condition_terms: list[str] = field(
         default_factory=lambda: [
             "bez investic",
+            "bez dalsich investic",
+            "bez nutnosti servisu",
             "po servisu",
+            "nove servisovano",
             "pravidelny servis",
+            "servis neni potreba",
+            "pripraveno k jizde",
+            "pripravene k jizde",
+            "pripravene na okamzite vyjeti",
+            "ihned k pouziti",
+            "staci sednout a jet",
+            "jen nasednout a jet",
+            "plne funkcni",
+            "vse 100 funkcni",
+            "vse funguje na 100",
+            "pravidelne servisovane",
+            "vse zavcasu servisovano",
+            "dobrem stavu",
+            "peknem stavu",
+            "idealnim stavu",
+            "perfektnim stavu",
+            "vybornem stavu",
+            "bezvadny stav",
+            "jako nove",
+            "zachovale",
+            "udrzovane",
             "top stav",
             "perfektni stav",
             "velmi dobry stav",
             "vyborny stav",
             "ready to ride",
+            "fully serviced",
+        ]
+    )
+    completed_service_terms: list[str] = field(
+        default_factory=lambda: [
+            "po servisu",
+            "nove servisovano",
+            "bez nutnosti servisu",
+            "servis neni potreba",
+            "delal jsem servis",
+            "servis byl proveden",
+            "proveden servis",
+            "po kompletnim servisu",
             "fully serviced",
         ]
     )
@@ -739,6 +776,13 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
                 for value in deal_raw.get(
                     "positive_condition_terms",
                     DealScoringConfig().positive_condition_terms,
+                )
+            ],
+            completed_service_terms=[
+                str(value)
+                for value in deal_raw.get(
+                    "completed_service_terms",
+                    DealScoringConfig().completed_service_terms,
                 )
             ],
             service_required_terms=[
