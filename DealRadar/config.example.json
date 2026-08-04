@@ -1,0 +1,123 @@
+{
+  "database_path": "data/deal_radar.sqlite3",
+  "poll_interval_seconds": 420,
+  "feedback_poll_interval_seconds": 10,
+  "bootstrap_mode": "send_latest",
+  "max_initial_notifications": 1,
+  "max_notifications_per_run": 10,
+  "request_timeout_seconds": 30,
+  "profiles": [
+    {
+      "name": "Велосипеды — Прага + 50 км",
+      "rss_url": "https://www.bazos.cz/rss.php?rub=sp&hledat=kolo&hlokalita=11000&humkreis=50&cenaod=1000&cenado=100000",
+      "require_any_keywords": [
+        "kolo",
+        "bike",
+        "bicycle",
+        "elektrokolo",
+        "ebike"
+      ],
+      "exclude_title_keywords": [
+        "koupím",
+        "vidlice",
+        "sedlo",
+        "nabíječka",
+        "baterie",
+        "plášť",
+        "pneumatika",
+        "rám kola",
+        "náhradní díly"
+      ],
+      "min_price_czk": 1000,
+      "max_price_czk": 100000
+    }
+  ],
+  "cyklobazar_profiles": [
+    {
+      "name": "Cyklobazar — велосипеды в Праге",
+      "url": "https://www.cyklobazar.cz/kola?filter%5Bloc_country_id%5D=58&filter%5Bloc_district_id%5D=1000&filter%5Bloc_region_id%5D=3067695",
+      "enabled": true,
+      "location_label": "Praha",
+      "require_any_keywords": [],
+      "exclude_title_keywords": [],
+      "min_price_czk": 1000,
+      "max_price_czk": 100000,
+      "include_promoted": false
+    }
+  ],
+  "telegram": {
+    "bot_token": "",
+    "chat_id": ""
+  },
+  "retail": {
+    "enabled": true,
+    "sources": [
+      "zbozi"
+    ],
+    "max_enrichments_per_run": 3,
+    "min_comparables": 3,
+    "identity_min_confidence": 0.7,
+    "exact_match_threshold": 0.85,
+    "ambiguous_match_threshold": 0.7,
+    "success_cache_hours": 336,
+    "insufficient_cache_hours": 48,
+    "error_cache_hours": 1,
+    "source_timeout_seconds": 15,
+    "total_timeout_seconds": 45,
+    "max_parallel_requests": 3,
+    "max_queries_per_source": 2,
+    "max_product_pages": 3,
+    "max_offers_kept": 7,
+    "max_telegram_sources": 5,
+    "outlier_low_ratio": 0.55,
+    "outlier_high_ratio": 1.8,
+    "target_currency": "CZK",
+    "currency_rates_to_czk": {
+      "CZK": 1.0
+    },
+    "codex_enabled": false,
+    "codex_path": "codex",
+    "codex_schema_path": "schemas/bike_match.schema.json",
+    "codex_timeout_seconds": 60,
+    "codex_calls_per_hour": 3,
+    "codex_calls_per_day": 10
+  },
+  "scoring": {
+    "_comment": "Все веса/пороги опциональны — отсутствующие берутся из дефолтов кода",
+    "weights": {
+      "margin": 0.4,
+      "liquidity": 0.22,
+      "risk": 0.18,
+      "quality": 0.1,
+      "freshness": 0.1
+    },
+    "fixed_costs_czk": 1500,
+    "margin_points": [
+      [
+        0,
+        0
+      ],
+      [
+        2000,
+        60
+      ],
+      [
+        4000,
+        80
+      ],
+      [
+        8000,
+        95
+      ],
+      [
+        12000,
+        100
+      ]
+    ],
+    "routing": {
+      "hot_min_score": 70,
+      "hot_max_age_minutes": 15,
+      "notify_min_score": 40
+    }
+  }
+}

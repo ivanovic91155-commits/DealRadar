@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+  <channel>
+    <title>Bazoš test feed</title>
+    <item>
+      <title>Trek Marlin 7 horské kolo</title>
+      <link>https://sport.bazos.cz/inzerat/222333444/trek-marlin-7.php</link>
+      <guid>222333444</guid>
+      <description><![CDATA[
+        <img src="https://www.bazos.cz/img/1/444/222333444.jpg" />
+        Trek Marlin 7, velikost M, model 2023.<br />
+        12 500 Kč<br />
+        Praha 4<br />
+        140 00
+      ]]></description>
+      <pubDate>Thu, 16 Jul 2026 10:15:00 +0200</pubDate>
+    </item>
+    <item>
+      <title>Vidlice RockShox na kolo</title>
+      <link>https://sport.bazos.cz/inzerat/222333445/vidlice-rockshox.php</link>
+      <description><![CDATA[Samostatná vidlice.<br />3 000 Kč<br />Praha 6<br />160 00]]></description>
+      <pubDate>Thu, 16 Jul 2026 10:10:00 +0200</pubDate>
+    </item>
+    <item>
+      <title>Specialized Turbo Levo</title>
+      <link>https://sport.bazos.cz/inzerat/222333446/specialized-turbo-levo.php</link>
+      <description><![CDATA[Kompletní elektrokolo, velikost L.<br />Nabídněte<br />Praha-západ<br />252 26]]></description>
+      <pubDate>Thu, 16 Jul 2026 10:05:00 +0200</pubDate>
+      <media:content url="https://www.bazos.cz/img/6/446/222333446.jpg" type="image/jpeg" />
+    </item>
+    <item>
+      <title>Woom 4 dětské kolo: 9 000</title>
+      <link>https://sport.bazos.cz/inzerat/222333447/woom-4.php</link>
+      <description><![CDATA[Zachovalé dětské kolo bez ceny v popisu.]]></description>
+      <pubDate>Thu, 16 Jul 2026 10:00:00 +0200</pubDate>
+    </item>
+  </channel>
+</rss>
