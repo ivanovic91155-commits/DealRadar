@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -57,24 +58,60 @@ class DealRadarService:
             for profile in config.cyklobazar_profiles
             if profile.enabled
         )
+        # Backoff по источникам объявлений: label -> (paused_until_monotonic, delay).
+        # При 403/429 источник ставится на паузу с экспоненциальным ростом, чтобы
+        # не долбить площадку и не спровоцировать блокировку.
+        self._source_backoff: dict[str, tuple[float, float]] = {}
 
     def close(self) -> None:
         self.storage.close()
+
+    @staticmethod
+    def _is_rate_limited(exc: Exception) -> bool:
+        text = str(exc)
+        return "403" in text or "429" in text
+
+    def _next_interval(self) -> float:
+        """Интервал до следующего опроса с небольшим случайным джиттером,
+        чтобы запросы не били строго по расписанию (естественнее для площадки)."""
+        base = self.config.poll_interval_seconds
+        jitter = self.config.poll_jitter_seconds
+        if jitter <= 0:
+            return float(base)
+        return base + random.uniform(-jitter, jitter)
 
     def fetch_all(self) -> list[Listing]:
         results: list[Listing] = []
         errors: list[str] = []
         successful_sources = 0
+        now = time.monotonic()
         for source in self.sources:
             label = getattr(source, "label", None) or getattr(source.profile, "name", "marketplace")
+            paused = self._source_backoff.get(label)
+            if paused and now < paused[0]:
+                LOGGER.info("Profile %s on backoff, skipping this cycle", label)
+                continue
             try:
                 fetched = source.fetch()
                 successful_sources += 1
+                self._source_backoff.pop(label, None)  # успех — снимаем паузу
                 LOGGER.info("Profile %s: %d matching listings", label, len(fetched))
                 results.extend(fetched)
             except Exception as exc:  # keep other profiles alive
                 LOGGER.exception("Profile %s failed", label)
                 errors.append(f"{label}: {exc}")
+                if self._is_rate_limited(exc):
+                    prev_delay = self._source_backoff.get(label, (0.0, 0.0))[1]
+                    base = self.config.poll_interval_seconds
+                    delay = min(
+                        max(base, prev_delay * 2 if prev_delay else base),
+                        self.config.source_backoff_max_seconds,
+                    )
+                    self._source_backoff[label] = (time.monotonic() + delay, delay)
+                    LOGGER.warning(
+                        "Profile %s rate-limited (403/429); backing off %.0f min",
+                        label, delay / 60,
+                    )
         if successful_sources == 0 and errors:
             raise RuntimeError("All marketplace profiles failed: " + "; ".join(errors))
         return _deduplicate(results)
@@ -555,7 +592,7 @@ class DealRadarService:
                     raise
                 except Exception:
                     LOGGER.exception("Marketplace cycle failed")
-                next_marketplace_poll = started + self.config.poll_interval_seconds
+                next_marketplace_poll = started + self._next_interval()
                 continue
 
             try:

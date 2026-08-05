@@ -1,6 +1,6 @@
 {
   "database_path": "data/deal_radar.sqlite3",
-  "poll_interval_seconds": 3600,
+  "poll_interval_seconds": 420,
   "feedback_poll_interval_seconds": 10,
   "bootstrap_mode": "send_latest",
   "max_initial_notifications": 1,
@@ -51,13 +51,15 @@
   },
   "retail": {
     "enabled": true,
-    "sources": ["zbozi"],
+    "sources": [
+      "zbozi"
+    ],
     "max_enrichments_per_run": 3,
     "min_comparables": 3,
     "min_offer_match_score": 0.78,
     "two_source_max_spread_ratio": 0.35,
     "three_source_max_spread_ratio": 0.25,
-    "low_confidence_max_spread_ratio": 0.50,
+    "low_confidence_max_spread_ratio": 0.5,
     "identity_min_confidence": 0.7,
     "exact_match_threshold": 0.85,
     "ambiguous_match_threshold": 0.7,
@@ -74,7 +76,9 @@
     "outlier_low_ratio": 0.55,
     "outlier_high_ratio": 1.8,
     "target_currency": "CZK",
-    "currency_rates_to_czk": {"CZK": 1.0},
+    "currency_rates_to_czk": {
+      "CZK": 1.0
+    },
     "codex_enabled": false,
     "codex_path": "codex",
     "codex_schema_path": "schemas/bike_match.schema.json",
@@ -86,11 +90,16 @@
   },
   "market_pricing": {
     "enabled": true,
-    "sources": ["bazos_cz", "kleinanzeigen_de", "marktplaats_nl", "buycycle_eu"],
+    "sources": [
+      "bazos_cz",
+      "kleinanzeigen_de",
+      "marktplaats_nl",
+      "buycycle_eu"
+    ],
     "quick_sale_discount": 0.15,
     "max_foreign_markets_per_model": 2,
     "minimum_unique_comparables_before_fallback": 3,
-    "foreign_market_disagreement_threshold": 0.30,
+    "foreign_market_disagreement_threshold": 0.3,
     "max_comparable_age_days": 180,
     "max_results_per_source": 25,
     "max_queries_per_source": 1,
@@ -113,34 +122,102 @@
       "EU": 1.0
     },
     "brand_market_mapping": {
-      "Cube": ["DE"],
-      "Canyon": ["DE"],
-      "Rose": ["DE"],
-      "Focus": ["DE"],
-      "Haibike": ["DE"],
-      "Bulls": ["DE"],
-      "Ghost": ["DE"],
-      "Gazelle": ["NL"],
-      "Batavus": ["NL"],
-      "Koga": ["NL"],
-      "Kross": ["PL", "EU"],
-      "Author": ["CZ", "SK"],
-      "Rock Machine": ["CZ", "SK"],
-      "Orbea": ["ES", "EU"],
-      "Bianchi": ["IT", "EU"],
-      "Pinarello": ["IT", "EU"],
-      "Colnago": ["IT", "EU"],
-      "Trek": ["DE", "EU"],
-      "Specialized": ["DE", "EU"],
-      "Giant": ["DE", "EU"],
-      "Merida": ["DE", "EU"],
-      "Scott": ["DE", "EU"]
+      "Cube": [
+        "DE"
+      ],
+      "Canyon": [
+        "DE"
+      ],
+      "Rose": [
+        "DE"
+      ],
+      "Focus": [
+        "DE"
+      ],
+      "Haibike": [
+        "DE"
+      ],
+      "Bulls": [
+        "DE"
+      ],
+      "Ghost": [
+        "DE"
+      ],
+      "Gazelle": [
+        "NL"
+      ],
+      "Batavus": [
+        "NL"
+      ],
+      "Koga": [
+        "NL"
+      ],
+      "Kross": [
+        "PL",
+        "EU"
+      ],
+      "Author": [
+        "CZ",
+        "SK"
+      ],
+      "Rock Machine": [
+        "CZ",
+        "SK"
+      ],
+      "Orbea": [
+        "ES",
+        "EU"
+      ],
+      "Bianchi": [
+        "IT",
+        "EU"
+      ],
+      "Pinarello": [
+        "IT",
+        "EU"
+      ],
+      "Colnago": [
+        "IT",
+        "EU"
+      ],
+      "Trek": [
+        "DE",
+        "EU"
+      ],
+      "Specialized": [
+        "DE",
+        "EU"
+      ],
+      "Giant": [
+        "DE",
+        "EU"
+      ],
+      "Merida": [
+        "DE",
+        "EU"
+      ],
+      "Scott": [
+        "DE",
+        "EU"
+      ]
     },
     "category_market_mapping": {
-      "city": ["NL", "DE"],
-      "mountain": ["DE", "NL"],
-      "road": ["DE", "EU"],
-      "gravel": ["DE", "EU"]
+      "city": [
+        "NL",
+        "DE"
+      ],
+      "mountain": [
+        "DE",
+        "NL"
+      ],
+      "road": [
+        "DE",
+        "EU"
+      ],
+      "gravel": [
+        "DE",
+        "EU"
+      ]
     },
     "weights": {
       "exact_cz": 1.0,
@@ -323,7 +400,7 @@
     "lookup_mid_limit": 10,
     "lookup_high_limit": 15,
     "lookup_max_limit": 20,
-    "lookup_large_fraction": 0.20,
+    "lookup_large_fraction": 0.2,
     "duplicate_confirmed_similarity": 0.95,
     "duplicate_possible_similarity": 0.85,
     "duplicate_canonical_seen_tie_seconds": 300,
@@ -346,5 +423,7 @@
       "negotiable": 3,
       "urgent_sale": 5
     }
-  }
+  },
+  "poll_jitter_seconds": 60,
+  "source_backoff_max_seconds": 3600
 }

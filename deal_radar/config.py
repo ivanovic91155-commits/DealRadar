@@ -502,6 +502,8 @@ class DealScoringConfig:
 class AppConfig:
     database_path: str = "data/deal_radar.sqlite3"
     poll_interval_seconds: int = 600
+    poll_jitter_seconds: int = 60
+    source_backoff_max_seconds: int = 3600
     feedback_poll_interval_seconds: int = 10
     bootstrap_mode: str = "send_latest"
     max_initial_notifications: int = 1
@@ -552,6 +554,8 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
     config = AppConfig(
         database_path=raw.get("database_path", "data/deal_radar.sqlite3"),
         poll_interval_seconds=int(raw.get("poll_interval_seconds", 600)),
+        poll_jitter_seconds=int(raw.get("poll_jitter_seconds", 60)),
+        source_backoff_max_seconds=int(raw.get("source_backoff_max_seconds", 3600)),
         feedback_poll_interval_seconds=int(raw.get("feedback_poll_interval_seconds", 10)),
         bootstrap_mode=raw.get("bootstrap_mode", "send_latest"),
         max_initial_notifications=int(raw.get("max_initial_notifications", 1)),
