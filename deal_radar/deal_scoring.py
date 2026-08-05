@@ -330,11 +330,11 @@ class DealEvaluator:
 
         if valuation is None:
             missing_fields.append("market_valuation")
-            manual_reasons.append("Нет сохранённой оценки рынка этапа 2.1.")
+            manual_reasons.append("Рыночные данные по этой модели ещё не собраны.")
             flags.append("market_valuation_missing")
         if quick_sale_price is None or not math.isfinite(quick_sale_price):
             missing_fields.append("quick_sale_price_czk")
-            manual_reasons.append("Этап 2.1 не вернул цену быстрой продажи.")
+            manual_reasons.append("Не удалось рассчитать цену быстрой продажи.")
             flags.append("quick_sale_price_missing")
         if analysis.identity is None or not analysis.identity.brand or not analysis.identity.model:
             manual_reasons.append("Модель велосипеда определена неоднозначно.")
@@ -351,7 +351,7 @@ class DealEvaluator:
         elif condition == "contradictory":
             manual_reasons.append("Описание состояния содержит противоречивые признаки.")
         if self.config.manual_review_on_low_confidence and confidence_level == "low":
-            manual_reasons.append("Оценка рынка этапа 2.1 имеет низкую уверенность.")
+            manual_reasons.append("Рыночная оценка имеет низкую уверенность.")
             flags.append("low_market_confidence")
         if valuation and valuation.status in self.config.critical_valuation_statuses:
             manual_reasons.append(f"Статус оценки рынка требует проверки: {valuation.status}.")
@@ -368,7 +368,7 @@ class DealEvaluator:
                 for term in self.config.critical_warning_terms
                 if term
             ):
-                manual_reasons.append("Этап 2.1 вернул критическое предупреждение.")
+                manual_reasons.append("Рыночная оценка требует ручной проверки.")
                 flags.append("critical_market_warning")
         risk_text = " ".join(analysis.risks).casefold()
         normalized_risks = normalize_text(risk_text)
@@ -519,7 +519,7 @@ class DealEvaluator:
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        primary_reason = reasons[0] if reasons else "Решение рассчитано по правилам этапа 2.2."
+        primary_reason = reasons[0] if reasons else "Решение рассчитано автоматически по правилам."
         question = ""
         if status == "MANUAL_REVIEW":
             question = manual_reasons[0] if manual_reasons else "Проверьте исходные данные объявления."

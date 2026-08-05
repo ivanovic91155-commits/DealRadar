@@ -73,6 +73,15 @@ FRAME_RE = re.compile(
     r"\b(?:vel(?:ikost)?\.?|size|ram(?:u)?|frame|rahmen(?:gro(?:sse|ße))?|gro(?:sse|ße)|gr\.?|maat|framemaat)\s*[:.-]?\s*(xxs|xs|s|m/?l|m|l|xl|xxl|\d{2}(?:[.,]\d)?)\b",
     re.IGNORECASE,
 )
+# "velikost kol(a) 26" по-чешски = размер КОЛЁС, а не рамы. Ловим такие
+# случаи, чтобы не занести колёсный размер в поле рамы.
+FRAME_WHEEL_CONFUSION_RE = re.compile(
+    r"\b(?:vel(?:ikost)?\.?|size|maat)\s*(?:kol[ao]?|wheels?|wielen)\b",
+    re.IGNORECASE,
+)
+# Числовые размеры рамы валидны только как ростовка: дюймы 13-23 или см 38-62.
+# Всё, что похоже на колёса (24/26/27/28/29), рамой быть не может.
+WHEEL_LIKE_SIZES = {"24", "26", "27", "28", "29"}
 PRICE_SUFFIX_RE = re.compile(r"\s*:\s*\d[\d\s.\u00a0]*\s*$")
 TRAVEL_RE = re.compile(r"\b(80|90|100|110|120|130|140|150|160|170|180|190|200)\s*mm\b", re.IGNORECASE)
 
@@ -124,6 +133,16 @@ def _attribute_values(text: str) -> tuple[str, int | None, str, str]:
     wheel_value = (wheel_match.group(1) or wheel_match.group(2)) if wheel_match else ""
     wheel = wheel_value.replace(",", ".") if wheel_value else ""
     frame = frame_match.group(1).upper() if frame_match else ""
+    # Защита от путаницы колёс и рамы:
+    # 1) числовой "размер рамы", совпадающий с колёсным (26/28/29) — это колёса
+    # 2) "velikost kol 26" — это размер колёс, рама не указана
+    if frame and frame.split(".")[0].split(",")[0] in WHEEL_LIKE_SIZES:
+        frame = ""
+    if frame and FRAME_WHEEL_CONFUSION_RE.search(text):
+        # если совпадение рамы стоит там же, где "velikost kol" — сбрасываем
+        confusion = FRAME_WHEEL_CONFUSION_RE.search(text)
+        if frame_match and confusion and abs(frame_match.start() - confusion.start()) < 12:
+            frame = ""
     return generation, year, wheel, frame
 
 

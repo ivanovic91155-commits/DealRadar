@@ -279,7 +279,7 @@ class TelegramFeedbackTest(unittest.TestCase):
         )
         method, fields = telegram.calls[0]
         self.assertEqual(method, "sendMessage")
-        self.assertIn("Проверка DealRadar — этап 1.2", fields["text"])
+        self.assertIn("Проверка DealRadar", fields["text"])
         self.assertIn("Потенциально интересно · 72/100", fields["text"])
         self.assertIn("🆕 Новый:", fields["text"])
         self.assertIn("Открыть объявление", fields["text"])
@@ -318,7 +318,7 @@ class TelegramFeedbackTest(unittest.TestCase):
         method, fields = telegram.calls[0]
         self.assertEqual(method, "sendMessage")
         self.assertIn("Новое на Cyklobazar", fields["text"])
-        self.assertIn("🧪 <b>Проверка Cyklobazar</b>\nЭтап 1.1", fields["text"])
+        self.assertIn("🧪 <b>Проверка Cyklobazar</b>", fields["text"])
         self.assertIn("Цена продавца: 9 990 Kč", fields["text"])
         self.assertNotIn("Источник цены", fields["text"])
         keyboard = json.loads(fields["reply_markup"])

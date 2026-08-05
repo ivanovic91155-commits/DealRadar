@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from deal_radar.http import HttpError, post_form
@@ -18,9 +18,9 @@ SOURCE_LABELS = {
 SOURCE_CALLBACK_CODES = {"bazos": "b", "cyklobazar": "c"}
 CALLBACK_CODE_SOURCES = {code: source for source, code in SOURCE_CALLBACK_CODES.items()}
 LOGGER = logging.getLogger(__name__)
-DIAGNOSTIC_HEADER = "🧪 <b>Проверка Cyklobazar</b>\nЭтап 1.1\n\n"
-STAGE_1_2_DIAGNOSTIC_HEADER = "🧪 <b>Проверка DealRadar — этап 1.2</b>\n\n"
-STAGE_2_1_DIAGNOSTIC_HEADER = "🧪 <b>Проверка DealRadar — этап 2.1</b>\n\n"
+DIAGNOSTIC_HEADER = "🧪 <b>Проверка Cyklobazar</b>\n\n"
+STAGE_1_2_DIAGNOSTIC_HEADER = "🧪 <b>Проверка DealRadar</b>\n\n"
+STAGE_2_1_DIAGNOSTIC_HEADER = "🧪 <b>Проверка DealRadar</b>\n\n"
 PRIORITY_LABELS = {
     "urgent_candidate": "🔥 Высокий приоритет",
     "interesting_candidate": "✅ Потенциально интересно",
@@ -95,19 +95,45 @@ def _listing_keyboard(listing: Listing, *, classifications: bool = True) -> dict
     return {"inline_keyboard": rows}
 
 
-def _format_wheel_frame(identity) -> str:
-    """Строка с размером рамы и колёс. Колёса критичны для велосипеда —
-    если не распознаны, показываем это явно с предупреждением."""
-    parts = []
+def _relative_time(published_at) -> str:
+    """Возраст объявления человекочитаемо: 'только что', '12 мин назад',
+    '3 ч назад', '2 дн назад'. Для перекупа возраст критичен — успеть первым."""
+    if not published_at:
+        return ""
+    published = published_at
+    if published.tzinfo is None:
+        published = published.replace(tzinfo=UTC)
+    delta = datetime.now(UTC) - published
+    minutes = int(delta.total_seconds() // 60)
+    if minutes < 1:
+        return "только что"
+    if minutes < 60:
+        return f"{minutes} мин назад"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} ч назад"
+    days = hours // 24
+    return f"{days} дн назад"
+
+
+def _spec_lines(identity, listing) -> list[str]:
+    """Характеристики велосипеда, каждая с новой строки. Рама показывается
+    только если распознана; колёса критичны — если нет, явно предупреждаем."""
+    lines = []
     if identity and identity.frame_size:
-        parts.append(f"Рама {html.escape(identity.frame_size)}")
+        lines.append(f"📐 Рама {html.escape(identity.frame_size)}")
     if identity and identity.wheel_size:
         wheel = identity.wheel_size
-        wheel_label = wheel if '"' in wheel or "\'" in wheel else f'{wheel}"'
-        parts.append(f"Колёса {html.escape(wheel_label)}")
+        wheel_label = wheel if '"' in wheel else f'{wheel}"'
+        lines.append(f'🛞 Колёса {html.escape(wheel_label)}')
     else:
-        parts.append("⚠️ Колёса не указаны")
-    return "📐 " + " · ".join(parts) if parts else ""
+        lines.append("🛞 ⚠️ Колёса не указаны")
+    if listing.location:
+        lines.append(f"📍 {html.escape(listing.location[:60])}")
+    age = _relative_time(listing.published_at)
+    if age:
+        lines.append(f"🕒 {age}")
+    return lines
 
 
 def _price_estimate_block(analysis) -> list[str]:
@@ -176,18 +202,17 @@ def _analysis_card_text(
     if deal and deal.status == "MANUAL_REVIEW" and getattr(deal, "manual_review_question", ""):
         lines.append(f"⚠️ {html.escape(deal.manual_review_question)}")
 
-    # --- Название · площадка · время ---
-    title = html.escape(listing.title[:120])
-    published = listing.published_at.astimezone().strftime("%d.%m %H:%M") if listing.published_at else ""
-    head = f"🚲 <b>{title}</b> · {html.escape(marketplace)}"
-    if published:
-        head += f" · {published}"
-    lines.append(head)
+    lines.append("")
 
-    # --- Рама · колёса (колёса всегда на виду) ---
-    wheel_frame = _format_wheel_frame(identity)
-    if wheel_frame:
-        lines.append(wheel_frame)
+    # --- Название (модель) ---
+    title = html.escape(listing.title[:120])
+    lines.append(f"🚲 <b>{title}</b>")
+
+    # --- Площадка ---
+    lines.append(f"🏪 {html.escape(marketplace)}")
+
+    # --- Характеристики: рама / колёса / локация / возраст, каждая с новой строки ---
+    lines.extend(_spec_lines(identity, listing))
 
     lines.append("")
 
