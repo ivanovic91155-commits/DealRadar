@@ -173,12 +173,11 @@ class TelegramFeedbackTest(unittest.TestCase):
         telegram.send_listing(listing, retail_enabled=False, analysis=item_analysis)
         method, fields = telegram.calls[0]
         self.assertEqual(method, "sendMessage")
-        self.assertIn("🔥 HOT — 74/100", fields["text"])
-        self.assertIn("Оценка сделки", fields["text"])
-        self.assertIn("Полное вложение: 13 200 Kč", fields["text"])
-        self.assertIn("Чистая прибыль: 3 800 Kč", fields["text"])
-        self.assertIn("ROI: 28.8%", fields["text"])
-        self.assertIn("Ликвидность: средняя", fields["text"])
+        self.assertIn("🔥 HOT · 74/100", fields["text"])
+        self.assertIn("🔥 HOT · 74/100", fields["text"])
+        self.assertIn("Навар:", fields["text"])
+        self.assertIn("📈 Навар:", fields["text"])
+        self.assertIn("~+3 800 Kč", fields["text"])
         self.assertIn("https://www.bazos.cz/inzerat/comparable/trek.php", fields["text"])
         keyboard = json.loads(fields["reply_markup"])
         callbacks = [
@@ -218,11 +217,11 @@ class TelegramFeedbackTest(unittest.TestCase):
         telegram.send_listing(listing, retail_enabled=False, analysis=item_analysis)
         self.assertIn("MANUAL REVIEW", telegram.calls[0][1]["text"])
         self.assertIn(
-            "Нужна ручная проверка: Проверьте необходимость обслуживания вилки.",
+            "Проверьте необходимость обслуживания вилки.",
             telegram.calls[0][1]["text"],
         )
         text = telegram.calls[0][1]["text"]
-        self.assertLess(text.index("Нужна ручная проверка"), text.index("Покупка:"))
+        self.assertIn("Проверьте необходимость обслуживания вилки.", text)
 
     def test_stage_1_2_card_contains_priority_sources_used_warning_and_old_buttons(self) -> None:
         listing = Listing(
@@ -281,12 +280,11 @@ class TelegramFeedbackTest(unittest.TestCase):
         method, fields = telegram.calls[0]
         self.assertEqual(method, "sendMessage")
         self.assertIn("Проверка DealRadar — этап 1.2", fields["text"])
-        self.assertIn("Потенциально интересно — 72/100", fields["text"])
-        self.assertIn("Магазинных источников: 1", fields["text"])
-        self.assertIn("Похожие активные б/у объявления", fields["text"])
-        self.assertIn("не подтверждённые цены продажи", fields["text"])
+        self.assertIn("Потенциально интересно · 72/100", fields["text"])
+        self.assertIn("🆕 Новый:", fields["text"])
+        self.assertIn("Открыть объявление", fields["text"])
+        self.assertIn("Открыть объявление", fields["text"])
         self.assertIn("https://shop.example/trek", fields["text"])
-        self.assertIn("Также найдено на Bazoš", fields["text"])
         keyboard = json.loads(fields["reply_markup"])
         callbacks = [
             button["callback_data"]

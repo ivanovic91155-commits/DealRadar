@@ -10,7 +10,11 @@ from deal_radar.http import HttpError, post_form
 from deal_radar.models import Listing, ListingAnalysis, Valuation
 
 
-SOURCE_LABELS = {"bazos": "Bazoš", "cyklobazar": "Cyklobazar"}
+SOURCE_LABELS = {
+    "bazos": "Bazoš", "cyklobazar": "Cyklobazar",
+    "bazos_cz": "Bazoš", "kleinanzeigen_de": "Kleinanzeigen",
+    "marktplaats_nl": "Marktplaats", "buycycle": "Buycycle",
+}
 SOURCE_CALLBACK_CODES = {"bazos": "b", "cyklobazar": "c"}
 CALLBACK_CODE_SOURCES = {code: source for source, code in SOURCE_CALLBACK_CODES.items()}
 LOGGER = logging.getLogger(__name__)
@@ -91,6 +95,55 @@ def _listing_keyboard(listing: Listing, *, classifications: bool = True) -> dict
     return {"inline_keyboard": rows}
 
 
+def _format_wheel_frame(identity) -> str:
+    """Строка с размером рамы и колёс. Колёса критичны для велосипеда —
+    если не распознаны, показываем это явно с предупреждением."""
+    parts = []
+    if identity and identity.frame_size:
+        parts.append(f"Рама {html.escape(identity.frame_size)}")
+    if identity and identity.wheel_size:
+        wheel = identity.wheel_size
+        wheel_label = wheel if '"' in wheel or "\'" in wheel else f'{wheel}"'
+        parts.append(f"Колёса {html.escape(wheel_label)}")
+    else:
+        parts.append("⚠️ Колёса не указаны")
+    return "📐 " + " · ".join(parts) if parts else ""
+
+
+def _price_estimate_block(analysis) -> list[str]:
+    """Каскад рыночной оценки для карточки. Требование: в каждой карточке
+    хотя бы какая-то оценка. Порядок: цены б/у с площадок → цена нового ×
+    амортизация → честное 'недоступно'. Возвращает строки блока 📊/📈."""
+    lines: list[str] = []
+    market = analysis.market_valuation
+    deal = analysis.deal_evaluation
+    valuation = analysis.valuation
+
+    # 1. Рыночная оценка (лучший доступный источник)
+    if market and market.market_price_czk is not None:
+        note = ""
+        if market.status == "depreciation_estimate":
+            note = " (от цены нового, б/у-аналогов нет)"
+        elif market.status == "foreign_only_estimate":
+            note = " (по зарубежному рынку)"
+        lines.append(f"📊 Оценка б/у: <b>~{format_czk(market.market_price_czk)}</b>{note}")
+        if market.comparables_unique and market.status not in {"depreciation_estimate"}:
+            lines[-1] += f" · {market.comparables_unique} аналогов"
+    elif valuation and valuation.median_price_czk is not None:
+        # b/у нет, но есть цена нового — грубая оценка через амортизацию уже
+        # посчитана в market как depreciation_estimate; сюда попадаем если её нет
+        lines.append("📊 Рыночная оценка недоступна — проверьте вручную")
+    else:
+        lines.append("📊 Рыночная оценка недоступна — проверьте вручную")
+
+    # 2. Навар (только если посчитан)
+    if deal and deal.net_profit_czk is not None:
+        sign = "+" if deal.net_profit_czk >= 0 else "−"
+        approx = " (приблизительно)" if (market and market.status == "depreciation_estimate") else " после расходов"
+        lines.append(f"📈 Навар: <b>~{sign}{format_czk(abs(round(deal.net_profit_czk)))}</b>{approx}")
+    return lines
+
+
 def _analysis_card_text(
     listing: Listing,
     analysis: ListingAnalysis,
@@ -100,182 +153,79 @@ def _analysis_card_text(
     identity = analysis.identity
     valuation = analysis.valuation
     market_valuation = analysis.market_valuation
-    deal_evaluation = analysis.deal_evaluation
-    used = analysis.used_comparables
-    priority = PRIORITY_LABELS.get(analysis.priority_class, analysis.priority_class)
+    deal = analysis.deal_evaluation
     marketplace = SOURCE_LABELS.get(listing.source, listing.source)
+
+    # --- Заголовок: один статус + один балл ---
+    if deal:
+        status = DEAL_STATUS_LABELS.get(deal.status, deal.status)
+        score = f"{deal.deal_score:.0f}"
+    else:
+        status = PRIORITY_LABELS.get(analysis.priority_class, analysis.priority_class)
+        score = f"{analysis.preliminary_priority_score}"
+
     lines = []
     if diagnostic_header == "stage_1_2":
         lines.append(STAGE_1_2_DIAGNOSTIC_HEADER.rstrip())
     elif diagnostic_header == "stage_2_1":
         lines.append(STAGE_2_1_DIAGNOSTIC_HEADER.rstrip())
-    if deal_evaluation:
-        lines.append(
-            f"<b>{DEAL_STATUS_LABELS.get(deal_evaluation.status, deal_evaluation.status)}"
-            f" — {deal_evaluation.deal_score:.0f}/100</b>"
-        )
-        lines.append(f"Предварительный приоритет: {priority} · {analysis.preliminary_priority_score}/100")
-    else:
-        lines.append(f"<b>{priority} — {analysis.preliminary_priority_score}/100</b>")
-    lines.extend(
-        [
-            f"🚲 {html.escape(marketplace)} · <b>{html.escape(listing.title[:180])}</b>",
-            f"💰 Цена продавца: <b>{format_seller_price(listing)}</b>",
-        ]
-    )
-    if listing.location:
-        lines.append(f"📍 {html.escape(listing.location[:100])}")
-    if listing.published_at:
-        lines.append(f"🕒 {listing.published_at.astimezone().strftime('%d.%m %H:%M')}")
-    if identity:
-        recognized = " ".join(part for part in (identity.brand, identity.model) if part)
-        lines.append(f"🔎 Модель: {html.escape(recognized or 'не подтверждена')}")
-    for alternative in analysis.duplicate_alternatives[:2]:
-        source = SOURCE_LABELS.get(alternative.get("source", ""), alternative.get("source", ""))
-        url = html.escape(alternative.get("url", ""), quote=True)
-        if url:
-            lines.append(f'🔁 <a href="{url}">Также найдено на {html.escape(source)}</a>')
 
-    if deal_evaluation:
-        liquidity = LIQUIDITY_LABELS.get(
-            deal_evaluation.liquidity_level,
-            deal_evaluation.liquidity_level,
-        )
-        if deal_evaluation.estimated_days_to_sell is not None:
-            liquidity += f", ориентир до {deal_evaluation.estimated_days_to_sell} дней"
-        confidence = CONFIDENCE_LABELS.get(
-            deal_evaluation.confidence_level,
-            deal_evaluation.confidence_level,
-        )
-        if deal_evaluation.confidence_score is not None:
-            confidence += f" ({deal_evaluation.confidence_score}/100)"
-        lines.extend(
-            [
-                "",
-                "<b>💼 Оценка сделки</b>",
-                f"Статус: <b>{html.escape(deal_evaluation.status)}</b>",
-            ]
-        )
-        if deal_evaluation.status == "MANUAL_REVIEW":
-            lines.append(
-                f"⚠️ Нужна ручная проверка: {html.escape(deal_evaluation.manual_review_question)}"
-            )
-        lines.extend(
-            [
-                f"Покупка: {format_czk(round(deal_evaluation.purchase_price_czk)) if deal_evaluation.purchase_price_czk is not None else 'нет данных'}",
-                f"Рыночная медиана: {format_czk(round(deal_evaluation.market_median_czk)) if deal_evaluation.market_median_czk is not None else 'нет данных'}",
-                f"Быстрая продажа: {format_czk(round(deal_evaluation.quick_sale_price_czk)) if deal_evaluation.quick_sale_price_czk is not None else 'нет данных'}",
-                f"Резерв риска: {format_czk(round(deal_evaluation.risk_reserve_czk)) if deal_evaluation.risk_reserve_czk is not None else 'нет данных'}",
-                f"Полное вложение: {format_czk(round(deal_evaluation.total_investment_czk)) if deal_evaluation.total_investment_czk is not None else 'нет данных'}",
-                f"Чистая прибыль: {format_czk(round(deal_evaluation.net_profit_czk)) if deal_evaluation.net_profit_czk is not None else 'нет данных'}",
-                f"ROI: {deal_evaluation.roi_percent:.1f}%" if deal_evaluation.roi_percent is not None else "ROI: нет данных",
-                f"Ликвидность: {html.escape(liquidity)}",
-                f"Уверенность: {html.escape(confidence)}",
-                f"Почему: {html.escape(deal_evaluation.explanation)}",
-            ]
-        )
+    lines.append(f"<b>{status} · {score}/100</b>")
 
-    if market_valuation:
-        lines.extend(["", "<b>📊 Оценка рынка</b>"])
-        if market_valuation.market_price_czk is not None:
-            lines.extend(
-                [
-                    f"Ориентировочная цена: <b>{format_czk(market_valuation.market_price_czk)}</b>",
-                    f"Диапазон рынка: {format_czk(market_valuation.price_low_czk)}–{format_czk(market_valuation.price_high_czk)}",
-                    f"Цена быстрой продажи: <b>{format_czk(market_valuation.quick_sale_price_czk)}</b>",
-                    f"Уверенность: {CONFIDENCE_LABELS.get(market_valuation.confidence, market_valuation.confidence)}",
-                    "",
-                    "<b>Аналоги:</b>",
-                    f"• Чехия: {market_valuation.cz_comparables}",
-                    f"• Зарубежные: {market_valuation.foreign_comparables}",
-                    f"• Всего найдено: {market_valuation.comparables_total}",
-                    f"• После удаления дублей: {market_valuation.comparables_unique}",
-                    (
-                        "Типы: "
-                        f"точные {market_valuation.exact_comparables} · "
-                        f"близкие {market_valuation.close_comparables} · "
-                        f"семейство {market_valuation.family_comparables} · "
-                        f"класс {market_valuation.component_comparables}"
-                    ),
-                    "Это запрашиваемые цены продавцов, а не подтверждённые цены реальных продаж.",
-                ]
-            )
-            comparable_links = [
-                f'<a href="{html.escape(item.url, quote=True)}">{html.escape(item.title[:45])}</a>'
-                for item in market_valuation.comparables[:2]
-                if item.url
-            ]
-            if comparable_links:
-                lines.append("Лучшие аналоги: " + " · ".join(comparable_links))
-            if market_valuation.status == "foreign_only_estimate":
-                countries = ", ".join(market_valuation.countries_used) or "зарубежному рынку"
-                lines.append(
-                    f"⚠️ В Чехии подходящие аналоги не найдены. Оценка построена по рынку {html.escape(countries)}."
-                )
-            if market_valuation.status == "depreciation_estimate":
-                lines.append(
-                    "⚠️ Used-аналоги не найдены. Цена приблизительно рассчитана от стоимости нового велосипеда."
-                )
-        else:
-            lines.append(
-                f"Рыночная цена не найдена · статус: {html.escape(market_valuation.status)}."
-            )
-        for warning in market_valuation.warnings[:2]:
-            if "зарубежному рынку" not in warning and "Used-аналоги" not in warning:
-                lines.append(f"⚠️ {html.escape(warning)}")
+    # Для MANUAL_REVIEW — что именно проверить (одной строкой)
+    if deal and deal.status == "MANUAL_REVIEW" and getattr(deal, "manual_review_question", ""):
+        lines.append(f"⚠️ {html.escape(deal.manual_review_question)}")
 
+    # --- Название · площадка · время ---
+    title = html.escape(listing.title[:120])
+    published = listing.published_at.astimezone().strftime("%d.%m %H:%M") if listing.published_at else ""
+    head = f"🚲 <b>{title}</b> · {html.escape(marketplace)}"
+    if published:
+        head += f" · {published}"
+    lines.append(head)
+
+    # --- Рама · колёса (колёса всегда на виду) ---
+    wheel_frame = _format_wheel_frame(identity)
+    if wheel_frame:
+        lines.append(wheel_frame)
+
+    lines.append("")
+
+    # --- Цена продавца ---
+    lines.append(f"💰 Цена: <b>{format_seller_price(listing)}</b>")
+
+    # --- Оценка + навар (каскад) ---
+    lines.extend(_price_estimate_block(analysis))
+
+    # --- Цена нового со ссылкой ---
     if valuation and valuation.median_price_czk is not None:
-        lines.append("")
-        lines.append(f"🆕 Цена нового: <b>около {format_czk(valuation.median_price_czk)}</b>")
-        lines.append(
-            f"Магазинных источников: {valuation.independent_source_count} · "
-            f"уверенность: {CONFIDENCE_LABELS.get(valuation.new_price_confidence, valuation.new_price_confidence)}"
-        )
-        if valuation.discount_percent is not None:
-            sign = "−" if valuation.discount_percent >= 0 else "+"
-            lines.append(f"Разница относительно цены нового велосипеда: около {sign}{abs(valuation.discount_percent)}%")
-        try:
-            checked = datetime.fromisoformat(valuation.checked_at).astimezone().strftime("%d.%m.%Y")
-            lines.append(f"Цена обновлена: {checked}" + (" · кэш" if analysis.cache_used else ""))
-        except (TypeError, ValueError):
-            pass
+        new_line = f"🆕 Новый: ~{format_czk(valuation.median_price_czk)}"
         if valuation.comparables:
-            links = []
-            for offer in valuation.comparables[:3]:
-                links.append(
-                    f'<a href="{html.escape(offer.url, quote=True)}">{html.escape(offer.seller[:45])}</a>'
-                )
-            lines.append("Источники: " + " · ".join(links))
-    else:
-        lines.extend(["", "🆕 Цена нового: не найдена или совпадение не подтверждено."])
+            offer = valuation.comparables[0]
+            new_line += f' — <a href="{html.escape(offer.url, quote=True)}">{html.escape(offer.seller[:24])} ↗</a>'
+        lines.append(new_line)
 
-    if used and used.count and market_valuation is None:
-        lines.extend(
-            [
-                "",
-                "<b>Похожие активные б/у объявления</b>",
-                f"{format_czk(used.minimum_price_czk)}–{format_czk(used.maximum_price_czk)} · найдено: {used.count}",
-                "Это запрашиваемые цены продавцов, а не подтверждённые цены продажи.",
-            ]
-        )
-        if used.items:
-            used_links = [
-                f'<a href="{html.escape(item.url, quote=True)}">{html.escape(item.title[:45])}</a>'
-                for item in used.items[:2]
-            ]
-            lines.append("Объявления: " + " · ".join(used_links))
-    if analysis.reasons:
-        lines.extend(["", "<b>Почему выбран приоритет:</b>"])
-        lines.extend(f"• {html.escape(reason)}" for reason in analysis.reasons[:3])
+    # --- Ссылки на аналоги б/у (до 2) ---
+    if market_valuation and market_valuation.comparables:
+        used_links = []
+        for item in market_valuation.comparables[:2]:
+            if item.url:
+                src = SOURCE_LABELS.get(item.source, item.source)
+                used_links.append(f'<a href="{html.escape(item.url, quote=True)}">{html.escape(src)} ↗</a>')
+        if used_links:
+            lines.append("🔁 Аналоги б/у: " + " · ".join(used_links))
+
+    # --- Плюсы и предупреждения одной-двумя строками ---
+    positives = analysis.reasons[:3] if analysis.reasons else []
+    if positives:
+        lines.append("")
+        lines.append("✓ " + " · ".join(html.escape(r) for r in positives))
     if analysis.risks:
-        lines.extend(["", "<b>Риски:</b>"])
-        lines.extend(f"• {html.escape(risk)}" for risk in analysis.risks[:3])
-    lines.extend(
-        [
-            "",
-            f'<a href="{html.escape(listing.url, quote=True)}">Открыть оригинальное объявление</a>',
-        ]
-    )
+        lines.append("⚠️ " + " · ".join(html.escape(r) for r in analysis.risks[:2]))
+
+    # --- Ссылка на объявление ---
+    lines.append("")
+    lines.append(f'<a href="{html.escape(listing.url, quote=True)}">Открыть объявление ↗</a>')
     return "\n".join(lines)
 
 
