@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 
 from deal_radar.config import AppConfig
-from deal_radar.bike_identity import identify_listing
+from deal_radar.bike_identity import configure_identity, identify_listing
 from deal_radar.deal_scoring import DealEvaluator, select_deal_notifications
 from deal_radar.exchange_rates import ExchangeRateProvider
 from deal_radar.http import get_bytes
@@ -47,6 +47,7 @@ def _deduplicate(listings: Iterable[Listing]) -> list[Listing]:
 class DealRadarService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
+        configure_identity(config.identity)
         self.storage = Storage(config.database_path)
         self.sources = [BazosSource(profile, config.request_timeout_seconds) for profile in config.profiles]
         self.sources.extend(

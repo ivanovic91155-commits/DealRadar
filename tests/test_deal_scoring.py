@@ -142,6 +142,21 @@ class DealFormulaAndStatusTest(unittest.TestCase):
         self.assertEqual(negative.status, "REJECT")
         self.assertEqual(zero.status, "REJECT")
 
+    def test_unconfirmed_model_blocks_hot_for_manual_review(self) -> None:
+        item = listing("unconfirmed")
+        item_analysis = analysis(item, market("unconfirmed", quick=16000))
+        item_analysis.identity.model_source = "tail"
+        result = self.evaluator.evaluate(item, item_analysis, None)
+        self.assertEqual(result.status, "MANUAL_REVIEW")
+        self.assertIn("unconfirmed_model", result.flags)
+
+    def test_legacy_identity_without_model_source_still_reaches_hot(self) -> None:
+        item = listing("legacy")
+        item_analysis = analysis(item, market("legacy", quick=16000))
+        self.assertEqual(item_analysis.identity.model_source, "")
+        result = self.evaluator.evaluate(item, item_analysis, None)
+        self.assertEqual(result.status, "HOT")
+
     def test_low_confidence_blocks_hot_for_manual_review(self) -> None:
         result = self.evaluate(
             listing("low-confidence"),

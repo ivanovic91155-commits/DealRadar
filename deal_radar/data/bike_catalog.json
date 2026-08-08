@@ -1,0 +1,446 @@
+{
+  "version": 1,
+  "motor_keywords": [
+    "bosch cx",
+    "bosch performance",
+    "performance line",
+    "active line",
+    "shimano steps",
+    "shimano ep8",
+    "ep8",
+    "yamaha pw",
+    "brose drive",
+    "bafang",
+    "fazua",
+    "mahle x35",
+    "sduro",
+    "xduro"
+  ],
+  "brands": {
+    "trek": {
+      "models": [
+        {"name": "Marlin"},
+        {"name": "X-Caliber", "aliases": ["xcaliber", "x caliber"]},
+        {"name": "Procaliber"},
+        {"name": "Supercaliber"},
+        {"name": "Roscoe"},
+        {"name": "Fuel EX"},
+        {"name": "Top Fuel"},
+        {"name": "Slash"},
+        {"name": "Remedy"},
+        {"name": "Session"},
+        {"name": "Domane"},
+        {"name": "Emonda"},
+        {"name": "Madone"},
+        {"name": "Checkpoint"},
+        {"name": "FX"},
+        {"name": "Dual Sport"},
+        {"name": "Verve"},
+        {"name": "Wahoo"},
+        {"name": "Farley"},
+        {"name": "Powerfly", "electric": true},
+        {"name": "Rail", "electric": true},
+        {"name": "Allant", "electric": true},
+        {"name": "Precaliber", "audience": "kids"}
+      ]
+    },
+    "specialized": {
+      "models": [
+        {"name": "Rockhopper"},
+        {"name": "Pitch"},
+        {"name": "Chisel"},
+        {"name": "Epic"},
+        {"name": "Stumpjumper"},
+        {"name": "Enduro"},
+        {"name": "Status"},
+        {"name": "Demo"},
+        {"name": "Allez"},
+        {"name": "Tarmac"},
+        {"name": "Roubaix"},
+        {"name": "Diverge"},
+        {"name": "Crux"},
+        {"name": "Sirrus"},
+        {"name": "Turbo Levo", "electric": true, "aliases": ["levo"]},
+        {"name": "Turbo Kenevo", "electric": true, "aliases": ["kenevo"]},
+        {"name": "Turbo Vado", "electric": true, "aliases": ["vado"]},
+        {"name": "Turbo Como", "electric": true, "aliases": ["como"]},
+        {"name": "Riprock", "audience": "kids"},
+        {"name": "Jett", "audience": "kids"}
+      ]
+    },
+    "cube": {
+      "models": [
+        {"name": "Aim"},
+        {"name": "Attention"},
+        {"name": "Analog"},
+        {"name": "Acid"},
+        {"name": "Access"},
+        {"name": "Reaction"},
+        {"name": "Elite"},
+        {"name": "AMS"},
+        {"name": "Stereo"},
+        {"name": "Nature"},
+        {"name": "Touring"},
+        {"name": "Kathmandu"},
+        {"name": "Hyde"},
+        {"name": "Agree"},
+        {"name": "Attain"},
+        {"name": "Litening"},
+        {"name": "Nuroad"},
+        {"name": "Cubie", "audience": "kids"},
+        {"name": "Kid", "audience": "kids"}
+      ]
+    },
+    "scott": {
+      "models": [
+        {"name": "Scale"},
+        {"name": "Aspect"},
+        {"name": "Spark"},
+        {"name": "Genius"},
+        {"name": "Ransom"},
+        {"name": "Gambler"},
+        {"name": "Addict"},
+        {"name": "Speedster"},
+        {"name": "Foil"},
+        {"name": "Contessa"},
+        {"name": "Sub Cross"},
+        {"name": "Sub Sport"},
+        {"name": "Roxter", "audience": "kids"},
+        {"name": "Scale RC", "aliases": ["scale rc"]},
+        {"name": "Strike eRide", "electric": true, "aliases": ["strike eride"]},
+        {"name": "Patron eRide", "electric": true, "aliases": ["patron eride"]}
+      ]
+    },
+    "author": {
+      "models": [
+        {"name": "Vision"},
+        {"name": "Solution"},
+        {"name": "Impulse"},
+        {"name": "Traction"},
+        {"name": "Instinct"},
+        {"name": "Pegas"},
+        {"name": "Mistral"},
+        {"name": "Stratos"},
+        {"name": "Compact"},
+        {"name": "Rapid"},
+        {"name": "Ronin"},
+        {"name": "Codex"},
+        {"name": "Charisma"},
+        {"name": "Ultima"},
+        {"name": "Grand"},
+        {"name": "Melody", "audience": "kids"},
+        {"name": "Cosmic"},
+        {"name": "Elektra", "electric": true}
+      ]
+    },
+    "giant": {
+      "models": [
+        {"name": "Talon"},
+        {"name": "Fathom"},
+        {"name": "XTC"},
+        {"name": "Trance"},
+        {"name": "Reign"},
+        {"name": "Anthem"},
+        {"name": "Stance"},
+        {"name": "Glory"},
+        {"name": "Defy"},
+        {"name": "TCR"},
+        {"name": "Propel"},
+        {"name": "Contend"},
+        {"name": "Revolt"},
+        {"name": "Escape"},
+        {"name": "Roam"},
+        {"name": "Trance X E+", "electric": true, "aliases": ["trance x e"]},
+        {"name": "Explore E+", "electric": true, "aliases": ["explore e"]}
+      ]
+    },
+    "merida": {
+      "models": [
+        {"name": "Big Nine", "aliases": ["big.nine", "bignine"]},
+        {"name": "Big Seven", "aliases": ["big.seven", "bigseven"]},
+        {"name": "Big Trail", "aliases": ["bigtrail"]},
+        {"name": "One-Twenty", "aliases": ["one twenty", "onetwenty"]},
+        {"name": "One-Forty", "aliases": ["one forty", "oneforty"]},
+        {"name": "One-Sixty", "aliases": ["one sixty", "onesixty"]},
+        {"name": "Ninety-Six", "aliases": ["ninety six", "ninetysix"]},
+        {"name": "Scultura"},
+        {"name": "Reacto"},
+        {"name": "Silex"},
+        {"name": "Crossway"},
+        {"name": "Speeder"},
+        {"name": "eOne-Sixty", "electric": true, "aliases": ["eone sixty", "eonesixty"]},
+        {"name": "eBig Nine", "electric": true, "aliases": ["ebig nine"]},
+        {"name": "Matts"},
+        {"name": "Dakar", "audience": "kids"}
+      ]
+    },
+    "canyon": {
+      "models": [
+        {"name": "Spectral"},
+        {"name": "Neuron"},
+        {"name": "Torque"},
+        {"name": "Stoic"},
+        {"name": "Grand Canyon"},
+        {"name": "Exceed"},
+        {"name": "Lux"},
+        {"name": "Sender"},
+        {"name": "Endurace"},
+        {"name": "Ultimate"},
+        {"name": "Aeroad"},
+        {"name": "Grail"},
+        {"name": "Roadlite"},
+        {"name": "Pathlite"},
+        {"name": "Offspring", "audience": "kids"}
+      ]
+    },
+    "cannondale": {
+      "models": [
+        {"name": "Trail"},
+        {"name": "Habit"},
+        {"name": "Scalpel"},
+        {"name": "Jekyll"},
+        {"name": "Cujo"},
+        {"name": "Topstone"},
+        {"name": "Synapse"},
+        {"name": "SuperSix", "aliases": ["super six"]},
+        {"name": "CAAD"},
+        {"name": "Quick"},
+        {"name": "Bad Boy"},
+        {"name": "Moterra", "electric": true},
+        {"name": "Kids Trail", "audience": "kids", "aliases": ["kids trail"]}
+      ]
+    },
+    "kellys": {
+      "models": [
+        {"name": "Spider"},
+        {"name": "Gibon"},
+        {"name": "Madman"},
+        {"name": "Gate"},
+        {"name": "Whip"},
+        {"name": "Soot"},
+        {"name": "Carson"},
+        {"name": "Phanatic"},
+        {"name": "Cliff"},
+        {"name": "Tygon", "electric": true},
+        {"name": "Theos", "electric": true},
+        {"name": "Kiter", "audience": "kids"},
+        {"name": "Lumi", "audience": "kids"}
+      ]
+    },
+    "superior": {
+      "models": [
+        {"name": "XC"},
+        {"name": "XP"},
+        {"name": "XF"},
+        {"name": "Racer", "audience": "kids"},
+        {"name": "Modo"},
+        {"name": "eXC", "electric": true},
+        {"name": "eXP", "electric": true}
+      ]
+    },
+    "ghost": {
+      "models": [
+        {"name": "Kato"},
+        {"name": "Lector"},
+        {"name": "Riot"},
+        {"name": "Nirvana"},
+        {"name": "Lanao"},
+        {"name": "Square"},
+        {"name": "SL AMR", "aliases": ["sl amr"]},
+        {"name": "E-Riot", "electric": true, "aliases": ["e riot"]},
+        {"name": "Powerkid", "audience": "kids"}
+      ]
+    },
+    "ktm": {
+      "models": [
+        {"name": "Ultra"},
+        {"name": "Chicago"},
+        {"name": "Myroon"},
+        {"name": "Scarp"},
+        {"name": "Life"},
+        {"name": "Revelator"},
+        {"name": "Wild Cross", "audience": "kids", "aliases": ["wild cross"]},
+        {"name": "Macina", "electric": true}
+      ]
+    },
+    "orbea": {
+      "models": [
+        {"name": "Alma"},
+        {"name": "Oiz"},
+        {"name": "Occam"},
+        {"name": "Rallon"},
+        {"name": "Laufey"},
+        {"name": "Orca"},
+        {"name": "Avant"},
+        {"name": "Terra"},
+        {"name": "Vector"},
+        {"name": "MX"},
+        {"name": "Rise", "electric": true},
+        {"name": "Wild", "electric": true},
+        {"name": "MX Team", "audience": "kids", "aliases": ["mx team"]}
+      ]
+    },
+    "rock machine": {
+      "models": [
+        {"name": "Manhattan"},
+        {"name": "Blizz"},
+        {"name": "Torrent"},
+        {"name": "Thunder"},
+        {"name": "Storm"},
+        {"name": "Catherine"},
+        {"name": "Crossride"},
+        {"name": "Heatwave"},
+        {"name": "Blizzard"}
+      ]
+    },
+    "kona": {
+      "models": [
+        {"name": "Process"},
+        {"name": "Honzo"},
+        {"name": "Kahuna"},
+        {"name": "Hei Hei", "aliases": ["heihei"]},
+        {"name": "Unit"},
+        {"name": "Sutra"},
+        {"name": "Rove"},
+        {"name": "Dew"},
+        {"name": "Remote", "electric": true}
+      ]
+    },
+    "santa cruz": {
+      "models": [
+        {"name": "Chameleon"},
+        {"name": "Tallboy"},
+        {"name": "Hightower"},
+        {"name": "Megatower"},
+        {"name": "Nomad"},
+        {"name": "Bronson"},
+        {"name": "Blur"},
+        {"name": "5010"},
+        {"name": "Heckler", "electric": true}
+      ]
+    },
+    "haibike": {
+      "models": [
+        {"name": "AllMtn", "electric": true, "aliases": ["all mtn", "allmountain"]},
+        {"name": "AllTrail", "electric": true, "aliases": ["all trail"]},
+        {"name": "AllTrack", "electric": true, "aliases": ["all track"]},
+        {"name": "SDURO", "electric": true},
+        {"name": "XDURO", "electric": true},
+        {"name": "FullSeven", "electric": true, "aliases": ["full seven"]},
+        {"name": "FullNine", "electric": true, "aliases": ["full nine"]},
+        {"name": "HardSeven", "electric": true, "aliases": ["hard seven"]},
+        {"name": "HardNine", "electric": true, "aliases": ["hard nine"]},
+        {"name": "Trekking", "electric": true},
+        {"name": "Adventr", "electric": true}
+      ]
+    },
+    "woom": {
+      "audience": "kids",
+      "models": [
+        {"name": "1"},
+        {"name": "2"},
+        {"name": "3"},
+        {"name": "4"},
+        {"name": "5"},
+        {"name": "6"},
+        {"name": "Original", "aliases": ["original"]},
+        {"name": "Off"},
+        {"name": "Off Air", "aliases": ["off air"]},
+        {"name": "Now"},
+        {"name": "Explore"},
+        {"name": "Up", "electric": true}
+      ]
+    },
+    "bergamont": {
+      "models": [
+        {"name": "Revox"},
+        {"name": "Contrail"},
+        {"name": "Trailster"},
+        {"name": "Grandurance"},
+        {"name": "Helix"},
+        {"name": "Horizon"},
+        {"name": "E-Horizon", "electric": true, "aliases": ["e horizon"]}
+      ]
+    },
+    "focus": {
+      "models": [
+        {"name": "Whistler"},
+        {"name": "Jarifa", "electric": true},
+        {"name": "Raven"},
+        {"name": "Jam"},
+        {"name": "Thron"},
+        {"name": "Izalco"},
+        {"name": "Paralane"},
+        {"name": "Atlas"}
+      ]
+    },
+    "gt": {
+      "models": [
+        {"name": "Aggressor"},
+        {"name": "Avalanche"},
+        {"name": "Zaskar"},
+        {"name": "Sensor"},
+        {"name": "Force"},
+        {"name": "Fury"},
+        {"name": "Grade"},
+        {"name": "Traffic"}
+      ]
+    },
+    "lapierre": {
+      "models": [
+        {"name": "Prorace"},
+        {"name": "Edge"},
+        {"name": "Zesty"},
+        {"name": "Spicy"},
+        {"name": "Xelius"},
+        {"name": "Sensium"},
+        {"name": "Overvolt", "electric": true}
+      ]
+    },
+    "kross": {
+      "models": [
+        {"name": "Hexagon"},
+        {"name": "Level"},
+        {"name": "Esker"},
+        {"name": "Earth"},
+        {"name": "Trans"},
+        {"name": "Evado"},
+        {"name": "Vento"}
+      ]
+    },
+    "marin": {
+      "models": [
+        {"name": "Bobcat Trail", "aliases": ["bobcat trail", "bobcat"]},
+        {"name": "Rift Zone", "aliases": ["rift zone"]},
+        {"name": "Alpine Trail", "aliases": ["alpine trail"]},
+        {"name": "San Quentin", "aliases": ["san quentin"]},
+        {"name": "Nicasio"},
+        {"name": "Fairfax"}
+      ]
+    },
+    "mondraker": {
+      "models": [
+        {"name": "Chrono"},
+        {"name": "Podium"},
+        {"name": "Foxy"},
+        {"name": "Superfoxy"},
+        {"name": "Dune"},
+        {"name": "Summum"},
+        {"name": "Crafty", "electric": true}
+      ]
+    },
+    "bmc": {
+      "models": [
+        {"name": "Twostroke", "aliases": ["two stroke"]},
+        {"name": "Fourstroke", "aliases": ["four stroke"]},
+        {"name": "Teamelite", "aliases": ["team elite"]},
+        {"name": "Trailfox"},
+        {"name": "Roadmachine"},
+        {"name": "Teammachine", "aliases": ["team machine"]},
+        {"name": "Timemachine", "aliases": ["time machine"]},
+        {"name": "URS"},
+        {"name": "Alpenchallenge"}
+      ]
+    }
+  }
+}

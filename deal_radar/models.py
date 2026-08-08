@@ -60,6 +60,10 @@ class BikeIdentity:
     brake_class: str = ""
     travel_mm: int | None = None
     confidence: float = 0.0
+    # Модель считается подтверждённой только при совпадении с каталогом.
+    # model_source: "catalog" | "catalog_fuzzy" | "tail" | "" (устаревшие записи).
+    model_confirmed: bool = False
+    model_source: str = ""
 
     @property
     def display_name(self) -> str:

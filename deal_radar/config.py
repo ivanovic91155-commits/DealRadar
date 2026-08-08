@@ -85,6 +85,39 @@ class TelegramConfig:
 
 
 @dataclass(slots=True)
+class IdentityConfig:
+    """Параметры распознавания бренда и модели велосипеда (этап 1)."""
+
+    catalog_enabled: bool = True
+    catalog_path: str = ""  # пусто -> файл, поставляемый вместе с пакетом
+    fuzzy_match_cutoff: float = 0.90
+    brand_score: float = 0.40
+    confirmed_model_score: float = 0.40
+    candidate_model_score: float = 0.20
+    unconfirmed_confidence_cap: float = 0.65
+
+    def validate(self) -> None:
+        scores = (
+            self.brand_score,
+            self.confirmed_model_score,
+            self.candidate_model_score,
+            self.unconfirmed_confidence_cap,
+        )
+        if any(not 0 <= value <= 1 for value in scores):
+            raise ValueError("identity scores must be between 0 and 1")
+        if self.candidate_model_score > self.confirmed_model_score:
+            raise ValueError(
+                "identity.candidate_model_score must not exceed identity.confirmed_model_score"
+            )
+        if self.brand_score + self.candidate_model_score > self.unconfirmed_confidence_cap:
+            raise ValueError(
+                "identity.unconfirmed_confidence_cap must cover brand_score + candidate_model_score"
+            )
+        if not 0.5 <= self.fuzzy_match_cutoff <= 1:
+            raise ValueError("identity.fuzzy_match_cutoff must be between 0.5 and 1")
+
+
+@dataclass(slots=True)
 class RetailConfig:
     enabled: bool = True
     sources: list[str] = field(default_factory=lambda: ["zbozi"])
@@ -350,6 +383,7 @@ class DealScoringConfig:
         default_factory=lambda: {"high": 85, "medium": 65, "low": 35}
     )
     minimum_identity_confidence: float = 0.55
+    require_confirmed_model: bool = True
     price_outlier_discount_percent: float = 80.0
     profit_score_target_czk: float = 8000.0
     roi_score_target_percent: float = 100.0
@@ -512,6 +546,7 @@ class AppConfig:
     profiles: list[SearchProfile] = field(default_factory=list)
     cyklobazar_profiles: list[CyklobazarProfile] = field(default_factory=list)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    identity: IdentityConfig = field(default_factory=IdentityConfig)
     retail: RetailConfig = field(default_factory=RetailConfig)
     market_pricing: MarketPricingConfig = field(default_factory=MarketPricingConfig)
     priority: PriorityConfig = field(default_factory=PriorityConfig)
@@ -530,6 +565,7 @@ class AppConfig:
             profile.validate()
         for profile in self.cyklobazar_profiles:
             profile.validate()
+        self.identity.validate()
         self.retail.validate()
         self.market_pricing.validate()
         self.priority.validate()
@@ -546,6 +582,7 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
 
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     telegram_raw = raw.get("telegram", {})
+    identity_raw = raw.get("identity", {})
     retail_raw = raw.get("retail", {})
     market_raw = raw.get("market_pricing", {})
     priority_raw = raw.get("priority", {})
@@ -568,6 +605,15 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
         telegram=TelegramConfig(
             bot_token=os.getenv("TELEGRAM_BOT_TOKEN", telegram_raw.get("bot_token", "")),
             chat_id=os.getenv("TELEGRAM_CHAT_ID", str(telegram_raw.get("chat_id", ""))),
+        ),
+        identity=IdentityConfig(
+            catalog_enabled=bool(identity_raw.get("catalog_enabled", True)),
+            catalog_path=str(identity_raw.get("catalog_path", "")),
+            fuzzy_match_cutoff=float(identity_raw.get("fuzzy_match_cutoff", 0.90)),
+            brand_score=float(identity_raw.get("brand_score", 0.40)),
+            confirmed_model_score=float(identity_raw.get("confirmed_model_score", 0.40)),
+            candidate_model_score=float(identity_raw.get("candidate_model_score", 0.20)),
+            unconfirmed_confidence_cap=float(identity_raw.get("unconfirmed_confidence_cap", 0.65)),
         ),
         retail=RetailConfig(
             enabled=bool(retail_raw.get("enabled", True)),
@@ -761,6 +807,7 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
                 **{str(key): int(value) for key, value in deal_raw.get("confidence_scores", {}).items()},
             },
             minimum_identity_confidence=float(deal_raw.get("minimum_identity_confidence", 0.55)),
+            require_confirmed_model=bool(deal_raw.get("require_confirmed_model", True)),
             price_outlier_discount_percent=float(
                 deal_raw.get("price_outlier_discount_percent", 80)
             ),

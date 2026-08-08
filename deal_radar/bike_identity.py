@@ -1,9 +1,25 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 
+from deal_radar import bike_catalog
+from deal_radar.config import IdentityConfig
 from deal_radar.models import BikeIdentity, Listing
+from deal_radar.text_utils import normalize_text
+
+__all__ = [
+    "BRANDS",
+    "build_search_queries",
+    "configure_identity",
+    "hard_filter_reason",
+    "has_accessory_terms",
+    "has_unavailable_terms",
+    "has_used_terms",
+    "identify_bike",
+    "identify_listing",
+    "model_family",
+    "normalize_text",
+]
 
 
 BRANDS = {
@@ -106,21 +122,54 @@ TRIM_WORDS = {
     "sport", "sx", "team", "ultimate",
 }
 COMPONENT_WORDS = {"deore", "fox", "rockshox", "shimano", "sram", "suntour", "xt", "xtr"}
+# Продавцы описывают состояние и условия продажи прямо в заголовке. Такие слова
+# не могут быть частью названия модели — иначе "Cube kolo po servisu" даёт
+# модель "Po Servisu". Многословные обороты вырезаются до токенизации.
+NOISE_PHRASES = (
+    "ve skvelem stavu", "v skvelem stavu", "ve vybornem stavu", "v vybornem stavu",
+    "v dobrem stavu", "ve velmi dobrem stavu", "po servisu", "po kompletnim servisu",
+    "po celkovem servisu", "jako nove", "jako novy", "top stav", "super stav",
+    "pekny stav", "dobry stav", "malo jete", "malo pouzivane", "po synovi", "po dceri",
+    "za odvoz", "cena dohodou", "k odberu", "sada kol", "nutny servis", "spatny stav",
+    "prodam kolo", "prodam jizdni kolo",
+)
+NOISE_WORDS = {
+    "levne", "levny", "rychle", "specha", "spechá", "stav", "stavu", "servis", "servisu",
+    "servisovane", "skvely", "skvelem", "vyborny", "vybornem", "perfektni", "perfektnim",
+    "zachovaly", "zachovale", "funkcni", "nefunkcni", "koupeno", "sleva", "dohodou",
+    "dohoda", "ihned", "odvoz", "odber", "moznost", "zaslani", "posilam", "dovezu",
+    "original", "doklad", "faktura", "zaruka", "zaruce", "nutno", "nutny", "vhodne",
+    "vhodny", "krasne", "krasny", "temer", "plne", "nevim", "neznam", "znacka", "dnes",
+    "stehovani", "nevyuzite", "potrebuji", "spech",
+}
 ACCESSORY_WORDS = {
     "baterie", "battery", "charger", "fork", "frame only", "helmet", "nabijecka", "plášť", "plast",
     "pneumatika", "ram kola", "sedlo", "vidlice", "bearing", "bearings", "headset", "lozisko",
-    "lozisek",
+    "lozisek", "sada kol", "vypletena kola", "wheelset",
 }
+# Продажа рамы отдельно: "prodám rám Trek", "rámec bez vidlice". Одиночное слово
+# "ram" в ACCESSORY_WORDS занести нельзя — оно встречается в размере рамы.
+ACCESSORY_PHRASES_RE = re.compile(
+    r"\b(?:prodam|prodej|pouze|jen|samotny|nabizim)\s+ram(?:ec|u)?\b"
+    r"|\bram(?:ec|u)?\s+(?:bez|z)\b"
+)
 USED_WORDS = {"bazar", "pouzite", "pouzity", "refurbished", "repasovane", "repasovany", "used"}
 UNAVAILABLE_WORDS = {"neni skladem", "out of stock", "unavailable", "vyprodano"}
 
 
-def normalize_text(value: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", value.casefold())
-    plain = "".join(char for char in decomposed if not unicodedata.combining(char))
-    plain = plain.replace("’", "'").replace("–", "-").replace("-", " ")
-    plain = re.sub(r"(?<=\d),(?=\d)", ".", plain)
-    return " ".join(re.sub(r"[^a-z0-9+./\"']+", " ", plain).split())
+NOISE_PHRASES_RE = re.compile(
+    "|".join(rf"(?<![a-z0-9]){re.escape(normalize_text(phrase))}(?![a-z0-9])" for phrase in NOISE_PHRASES)
+)
+MODEL_STOP_TOKENS = frozenset(GENERIC_WORDS | COLOR_WORDS | COMPONENT_WORDS | TRIM_WORDS | NOISE_WORDS)
+
+_IDENTITY_CONFIG = IdentityConfig()
+
+
+def configure_identity(config: IdentityConfig) -> None:
+    """Применить настройки идентификации из config.json (вызывается сервисом)."""
+    global _IDENTITY_CONFIG
+    _IDENTITY_CONFIG = config
+    bike_catalog.clear_cache()
 
 
 def _attribute_values(text: str) -> tuple[str, int | None, str, str]:
@@ -154,20 +203,36 @@ def _find_brand(normalized_title: str) -> tuple[str, tuple[int, int] | None]:
     return "", None
 
 
-def _extract_model(normalized_title: str, brand_span: tuple[int, int] | None) -> tuple[str, str]:
+def _model_tail(normalized_title: str, brand_span: tuple[int, int] | None) -> str:
+    """Хвост заголовка после бренда, очищенный от атрибутов и мусорных фраз."""
     if not brand_span:
-        return "", ""
+        return ""
     tail = normalized_title[brand_span[1] :]
     tail = GENERATION_RE.sub(" ", tail)
     tail = YEAR_RE.sub(" ", tail)
     tail = WHEEL_RE.sub(" ", tail)
     tail = FRAME_RE.sub(" ", tail)
+    tail = NOISE_PHRASES_RE.sub(" ", tail)
+    return " ".join(tail.split())
+
+
+def _extract_trim(tail: str) -> str:
+    trim_tokens = [token for token in tail.split() if token in TRIM_WORDS]
+    return " ".join(trim_tokens).upper()
+
+
+def _extract_model(tail: str) -> tuple[str, str]:
+    """Запасной путь: кандидат из свободных слов после бренда.
+
+    Результат никогда не считается подтверждённой моделью — он лишь помогает
+    поиску аналогов и дедупликации.
+    """
     tokens = re.findall(r"[a-z0-9+.-]+", tail)
     model_tokens: list[str] = []
     trim_tokens: list[str] = []
     for token in tokens:
         token = token.strip(".-")
-        if not token or token in GENERIC_WORDS:
+        if not token or token in GENERIC_WORDS or token in NOISE_WORDS:
             continue
         if token in COLOR_WORDS and model_tokens:
             break
@@ -247,8 +312,32 @@ def identify_bike(title: str, description: str = "") -> BikeIdentity:
     clean_title = PRICE_SUFFIX_RE.sub("", title).strip()
     normalized_title = normalize_text(clean_title)
     normalized_all = normalize_text(f"{clean_title} {description[:2500]}")
+    config = _IDENTITY_CONFIG
     brand, brand_span = _find_brand(normalized_title)
-    model, trim = _extract_model(normalized_title, brand_span)
+    tail = _model_tail(normalized_title, brand_span)
+    catalog = bike_catalog.load_catalog(config.catalog_path) if config.catalog_enabled else None
+    catalog_match = (
+        bike_catalog.match_model(
+            brand,
+            tail,
+            normalized_title,
+            normalized_all,
+            catalog=catalog,
+            fuzzy_cutoff=config.fuzzy_match_cutoff,
+            stop_tokens=MODEL_STOP_TOKENS,
+        )
+        if brand and catalog
+        else None
+    )
+    if catalog_match:
+        model = catalog_match.model
+        trim = _extract_trim(tail)
+        model_confirmed = True
+        model_source = catalog_match.source
+    else:
+        model, trim = _extract_model(tail)
+        model_confirmed = False
+        model_source = "tail" if model else ""
     generation, year, wheel, frame = _attribute_values(normalized_all)
 
     bike_type = ""
@@ -264,8 +353,14 @@ def identify_bike(title: str, description: str = "") -> BikeIdentity:
             bike_type = candidate
             break
 
-    if any(word in normalized_all for word in ("elektrokolo", "e bike", " ebike", "electric bike", "motor bosch")):
+    motor_terms = bike_catalog.motor_keywords(catalog) if catalog else ()
+    electric_terms = ("elektrokolo", "e bike", " ebike", "electric bike", "motor bosch")
+    if any(word in normalized_all for word in electric_terms) or any(
+        term in normalized_all for term in motor_terms
+    ):
         electric: bool | None = True
+    elif catalog_match and catalog_match.electric:
+        electric = True
     else:
         electric = False if brand and model else None
 
@@ -276,14 +371,24 @@ def identify_bike(title: str, description: str = "") -> BikeIdentity:
         audience = "women"
     elif any(word in normalized_all for word in ("panske", "men's")):
         audience = "men"
+    if not audience and catalog_match and catalog_match.audience:
+        audience = catalog_match.audience
 
+    # Уверенность отражает подтверждения, а не заполненность полей: выдуманная
+    # модель не должна получать тот же вес, что и найденная в каталоге.
     confidence = 0.0
-    confidence += 0.45 if brand else 0.0
-    confidence += 0.35 if model else 0.0
+    confidence += config.brand_score if brand else 0.0
+    if model_confirmed:
+        confidence += config.confirmed_model_score
+    elif model:
+        confidence += config.candidate_model_score
     confidence += 0.07 if generation else 0.0
     confidence += 0.06 if year else 0.0
     confidence += 0.04 if wheel else 0.0
     confidence += 0.03 if bike_type else 0.0
+    if model and not model_confirmed:
+        confidence = min(confidence, config.unconfirmed_confidence_cap)
+    confidence = min(confidence, 1.0)
     suspension, frame_material, fork_class, drivetrain_class, brake_class, travel = (
         _component_attributes(normalized_all)
     )
@@ -306,6 +411,8 @@ def identify_bike(title: str, description: str = "") -> BikeIdentity:
         brake_class=brake_class,
         travel_mm=travel,
         confidence=round(confidence, 2),
+        model_confirmed=model_confirmed,
+        model_source=model_source,
     )
 
 
@@ -329,6 +436,8 @@ def build_search_queries(identity: BikeIdentity) -> list[str]:
 
 def has_accessory_terms(text: str) -> bool:
     normalized = normalize_text(text)
+    if ACCESSORY_PHRASES_RE.search(normalized):
+        return True
     return any(normalize_text(word) in normalized for word in ACCESSORY_WORDS)
 
 

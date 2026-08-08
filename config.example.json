@@ -49,6 +49,15 @@
     "bot_token": "",
     "chat_id": ""
   },
+  "identity": {
+    "catalog_enabled": true,
+    "catalog_path": "",
+    "fuzzy_match_cutoff": 0.9,
+    "brand_score": 0.4,
+    "confirmed_model_score": 0.4,
+    "candidate_model_score": 0.2,
+    "unconfirmed_confidence_cap": 0.65
+  },
   "retail": {
     "enabled": true,
     "sources": [
@@ -284,6 +293,7 @@
       "low": 35
     },
     "minimum_identity_confidence": 0.55,
+    "require_confirmed_model": true,
     "price_outlier_discount_percent": 80,
     "profit_score_target_czk": 8000,
     "roi_score_target_percent": 100,

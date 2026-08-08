@@ -342,6 +342,12 @@ class DealEvaluator:
         elif analysis.identity.confidence < self.config.minimum_identity_confidence:
             manual_reasons.append("Уверенность распознавания модели ниже допустимого порога.")
             flags.append("low_identity_confidence")
+        elif self.config.require_confirmed_model and analysis.identity.model_source == "tail":
+            # Проверяем model_source, а не model_confirmed: у анализов, сохранённых
+            # до появления каталога, источник пуст, и они не должны задним числом
+            # уходить в ручную проверку.
+            manual_reasons.append("Модель не подтверждена каталогом — требуется ручная проверка.")
+            flags.append("unconfirmed_model")
         if condition == "unknown":
             manual_reasons.append("Состояние велосипеда не подтверждено описанием.")
         elif condition == "service_required":
