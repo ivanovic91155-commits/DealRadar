@@ -312,10 +312,18 @@ class ShadowModeCycleTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.directory.cleanup()
 
-    def build(self, ai: AIConfig, items: list[Listing]) -> tuple[DealRadarService, FakeTelegram]:
+    def build(
+        self,
+        ai: AIConfig,
+        items: list[Listing],
+        *,
+        bootstrap_mode: str = "send_all",
+        max_initial_notifications: int = 1,
+    ) -> tuple[DealRadarService, FakeTelegram]:
         config = AppConfig(
             database_path=str(Path(self.directory.name) / "state.sqlite3"),
-            bootstrap_mode="send_all",
+            bootstrap_mode=bootstrap_mode,
+            max_initial_notifications=max_initial_notifications,
             profiles=[
                 SearchProfile(name="test", rss_url="https://sport.bazos.cz/rss.php?hledat=kolo")
             ],
@@ -455,6 +463,30 @@ class ShadowModeCycleTest(unittest.TestCase):
         self.assertEqual(len(poster.calls), 2)
         self.assertEqual(stats["ai_calls"], 2)
         self.assertEqual(stats["ai_pending"], 3)
+
+    def test_bootstrap_suppression_does_not_hide_listings_from_ai(self) -> None:
+        """Regression: логи Railway 2026-08-08 показали, что при первом запуске
+        62 из 63 объявлений AI не проанализировал — они попали в suppress_keys
+        и pre-filter пометил их как DUPLICATE, а на следующем цикле они уже не
+        были 'new'. Bootstrap-подавление касается только Telegram."""
+
+        items = [listing(str(i)) for i in range(5)]
+        service, telegram = self.build(
+            AIConfig(enabled=True, api_key="sk-test"),
+            items,
+            bootstrap_mode="send_latest",
+            max_initial_notifications=1,
+        )
+        poster = RecordingPoster()
+        self.install(service, poster)
+        try:
+            stats = service.process_once(telegram)
+        finally:
+            service.close()
+        # Все 5 объявлений уходят в AI, хотя в Telegram уйдёт не больше одного.
+        self.assertEqual(len(poster.calls), 5)
+        self.assertEqual(stats["ai_calls"], 5)
+        self.assertEqual(stats["ai_skipped"], 0)
 
     def test_api_outage_keeps_the_cycle_alive(self) -> None:
         from deal_radar.http import HttpError

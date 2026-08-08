@@ -507,7 +507,12 @@ class DealRadarService:
 
         # Фаза AI Level 1. В shadow-режиме результат только сохраняется: ни
         # статусы, ни бюджет скрейпинга, ни Telegram его не читают.
-        ai_stats = self._run_ai_analysis(analyzed, suppress_keys | duplicate_suppressed_keys)
+        # Bootstrap-подавление (suppress_keys) — про Telegram, а не про дубликаты:
+        # если передать его сюда как "дубликаты", на первом запуске AI пропустит
+        # 62 из 63 объявлений и больше никогда к ним не вернётся, потому что на
+        # следующем цикле они уже не будут "new". Исключаем только подтверждённые
+        # cross-source дубликаты.
+        ai_stats = self._run_ai_analysis(analyzed, duplicate_suppressed_keys)
 
         lookup_budget = (
             dynamic_lookup_budget(len(new_listings), self.config.priority)
