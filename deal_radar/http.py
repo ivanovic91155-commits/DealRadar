@@ -11,7 +11,9 @@ USER_AGENT = "DealRadar-private/0.1 (RSS reader; private use)"
 
 
 class HttpError(RuntimeError):
-    pass
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def get_bytes(
@@ -47,7 +49,7 @@ def post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeou
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1000]
-        raise HttpError(f"POST {url} failed with HTTP {exc.code}: {detail}") from exc
+        raise HttpError(f"POST {url} failed with HTTP {exc.code}: {detail}", exc.code) from exc
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise HttpError(f"POST {url} failed: {exc}") from exc
 

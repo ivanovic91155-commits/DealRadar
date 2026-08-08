@@ -38,6 +38,16 @@ def _env_float(name: str, default: float) -> float:
     return default if value is None or not value.strip() else float(value)
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    return default if value is None or not value.strip() else int(value)
+
+
+def _env_str(name: str, default: str) -> str:
+    value = os.getenv(name)
+    return default if value is None or not value.strip() else value.strip()
+
+
 @dataclass(slots=True)
 class SearchProfile:
     name: str
@@ -115,6 +125,80 @@ class IdentityConfig:
             )
         if not 0.5 <= self.fuzzy_match_cutoff <= 1:
             raise ValueError("identity.fuzzy_match_cutoff must be between 0.5 and 1")
+
+
+@dataclass(slots=True)
+class AIConfig:
+    """AI Analysis Level 1 поверх OpenAI Responses API.
+
+    Цены за 1M токенов — публичный прайс-лист на 2026-08-08. Они меняются,
+    поэтому вынесены в конфиг и переопределяются переменными окружения.
+    """
+
+    enabled: bool = False  # kill switch: AI_ANALYSIS_ENABLED
+    shadow_mode: bool = True
+    can_affect_deal_status: bool = False
+    api_key: str = ""  # только из окружения, в JSON не хранится
+    api_base_url: str = "https://api.openai.com/v1"
+    model_primary: str = "gpt-5.6-luna"
+    model_fallback: str = "gpt-5.6-terra"
+    fallback_enabled: bool = True
+    max_retries: int = 2
+    timeout_seconds: int = 30
+    max_parallel_requests: int = 4
+    max_calls_per_cycle: int = 0  # 0 -> без лимита, бюджет ограничивают доллары
+    max_title_chars: int = 300
+    max_description_chars: int = 4000
+    cache_ttl_hours: int = 720
+    # Объявления с договорной ценой по умолчанию доходят до AI: раздел 4 ТЗ
+    # прямо требует не отсекать короткие объявления вроде «Prodám Scott, spěchá».
+    skip_listings_without_price: bool = False
+    daily_budget_usd: float = 5.0
+    warn_at_percent: float = 80.0
+    stop_at_budget: bool = True
+    primary_input_usd_per_1m: float = 0.20
+    primary_cached_input_usd_per_1m: float = 0.02
+    primary_output_usd_per_1m: float = 1.20
+    fallback_input_usd_per_1m: float = 2.00
+    fallback_cached_input_usd_per_1m: float = 0.20
+    fallback_output_usd_per_1m: float = 12.00
+    prompt_name: str = "listing-analysis"
+    prompt_version: str = "v1.0.0"
+    prompts_path: str = ""  # пусто -> каталог, поставляемый вместе с пакетом
+
+    def validate(self) -> None:
+        if urlparse(self.api_base_url).scheme != "https":
+            raise ValueError("ai.api_base_url must use HTTPS")
+        if not self.model_primary:
+            raise ValueError("ai.model_primary must not be empty")
+        if self.fallback_enabled and not self.model_fallback:
+            raise ValueError("ai.model_fallback must not be empty when fallback is enabled")
+        if not 0 <= self.max_retries <= 5:
+            raise ValueError("ai.max_retries must be between 0 and 5")
+        if not 5 <= self.timeout_seconds <= 300:
+            raise ValueError("ai.timeout_seconds must be between 5 and 300")
+        if not 1 <= self.max_parallel_requests <= 16:
+            raise ValueError("ai.max_parallel_requests must be between 1 and 16")
+        if self.max_calls_per_cycle < 0:
+            raise ValueError("ai.max_calls_per_cycle must not be negative")
+        if self.max_title_chars < 50 or self.max_description_chars < 200:
+            raise ValueError("ai text limits are too small to analyse a listing")
+        if self.cache_ttl_hours < 0:
+            raise ValueError("ai.cache_ttl_hours must not be negative")
+        if self.daily_budget_usd < 0:
+            raise ValueError("ai.daily_budget_usd must not be negative")
+        if not 0 < self.warn_at_percent <= 100:
+            raise ValueError("ai.warn_at_percent must be between 0 and 100")
+        prices = (
+            self.primary_input_usd_per_1m,
+            self.primary_cached_input_usd_per_1m,
+            self.primary_output_usd_per_1m,
+            self.fallback_input_usd_per_1m,
+            self.fallback_cached_input_usd_per_1m,
+            self.fallback_output_usd_per_1m,
+        )
+        if any(price < 0 for price in prices):
+            raise ValueError("ai token prices must not be negative")
 
 
 @dataclass(slots=True)
@@ -547,6 +631,7 @@ class AppConfig:
     cyklobazar_profiles: list[CyklobazarProfile] = field(default_factory=list)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     identity: IdentityConfig = field(default_factory=IdentityConfig)
+    ai: AIConfig = field(default_factory=AIConfig)
     retail: RetailConfig = field(default_factory=RetailConfig)
     market_pricing: MarketPricingConfig = field(default_factory=MarketPricingConfig)
     priority: PriorityConfig = field(default_factory=PriorityConfig)
@@ -566,6 +651,7 @@ class AppConfig:
         for profile in self.cyklobazar_profiles:
             profile.validate()
         self.identity.validate()
+        self.ai.validate()
         self.retail.validate()
         self.market_pricing.validate()
         self.priority.validate()
@@ -583,6 +669,7 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     telegram_raw = raw.get("telegram", {})
     identity_raw = raw.get("identity", {})
+    ai_raw = raw.get("ai", {})
     retail_raw = raw.get("retail", {})
     market_raw = raw.get("market_pricing", {})
     priority_raw = raw.get("priority", {})
@@ -614,6 +701,77 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
             confirmed_model_score=float(identity_raw.get("confirmed_model_score", 0.40)),
             candidate_model_score=float(identity_raw.get("candidate_model_score", 0.20)),
             unconfirmed_confidence_cap=float(identity_raw.get("unconfirmed_confidence_cap", 0.65)),
+        ),
+        ai=AIConfig(
+            enabled=_env_bool("AI_ANALYSIS_ENABLED", bool(ai_raw.get("enabled", False))),
+            shadow_mode=_env_bool("AI_SHADOW_MODE", bool(ai_raw.get("shadow_mode", True))),
+            can_affect_deal_status=_env_bool(
+                "AI_CAN_AFFECT_DEAL_STATUS", bool(ai_raw.get("can_affect_deal_status", False))
+            ),
+            # Ключ читается только из окружения и никогда не хранится в JSON.
+            api_key=os.getenv("OPENAI_API_KEY", "").strip(),
+            api_base_url=_env_str(
+                "OPENAI_API_BASE_URL", str(ai_raw.get("api_base_url", "https://api.openai.com/v1"))
+            ),
+            model_primary=_env_str(
+                "OPENAI_MODEL_PRIMARY", str(ai_raw.get("model_primary", "gpt-5.6-luna"))
+            ),
+            model_fallback=_env_str(
+                "OPENAI_MODEL_FALLBACK", str(ai_raw.get("model_fallback", "gpt-5.6-terra"))
+            ),
+            fallback_enabled=_env_bool(
+                "OPENAI_FALLBACK_ENABLED", bool(ai_raw.get("fallback_enabled", True))
+            ),
+            max_retries=_env_int("OPENAI_MAX_RETRIES", int(ai_raw.get("max_retries", 2))),
+            timeout_seconds=_env_int(
+                "OPENAI_TIMEOUT_SECONDS", int(ai_raw.get("timeout_seconds", 30))
+            ),
+            max_parallel_requests=_env_int(
+                "AI_MAX_PARALLEL_REQUESTS", int(ai_raw.get("max_parallel_requests", 4))
+            ),
+            max_calls_per_cycle=_env_int(
+                "AI_DEEP_ANALYSIS_LIMIT", int(ai_raw.get("max_calls_per_cycle", 0))
+            ),
+            max_title_chars=int(ai_raw.get("max_title_chars", 300)),
+            max_description_chars=int(ai_raw.get("max_description_chars", 4000)),
+            cache_ttl_hours=_env_int("AI_CACHE_TTL_HOURS", int(ai_raw.get("cache_ttl_hours", 720))),
+            skip_listings_without_price=bool(ai_raw.get("skip_listings_without_price", False)),
+            daily_budget_usd=_env_float(
+                "OPENAI_DAILY_BUDGET_USD", float(ai_raw.get("daily_budget_usd", 5.0))
+            ),
+            warn_at_percent=_env_float(
+                "OPENAI_WARN_AT_PERCENT", float(ai_raw.get("warn_at_percent", 80.0))
+            ),
+            stop_at_budget=_env_bool(
+                "OPENAI_STOP_AT_BUDGET", bool(ai_raw.get("stop_at_budget", True))
+            ),
+            primary_input_usd_per_1m=_env_float(
+                "OPENAI_PRIMARY_INPUT_USD_PER_1M",
+                float(ai_raw.get("primary_input_usd_per_1m", 0.20)),
+            ),
+            primary_cached_input_usd_per_1m=_env_float(
+                "OPENAI_PRIMARY_CACHED_INPUT_USD_PER_1M",
+                float(ai_raw.get("primary_cached_input_usd_per_1m", 0.02)),
+            ),
+            primary_output_usd_per_1m=_env_float(
+                "OPENAI_PRIMARY_OUTPUT_USD_PER_1M",
+                float(ai_raw.get("primary_output_usd_per_1m", 1.20)),
+            ),
+            fallback_input_usd_per_1m=_env_float(
+                "OPENAI_FALLBACK_INPUT_USD_PER_1M",
+                float(ai_raw.get("fallback_input_usd_per_1m", 2.00)),
+            ),
+            fallback_cached_input_usd_per_1m=_env_float(
+                "OPENAI_FALLBACK_CACHED_INPUT_USD_PER_1M",
+                float(ai_raw.get("fallback_cached_input_usd_per_1m", 0.20)),
+            ),
+            fallback_output_usd_per_1m=_env_float(
+                "OPENAI_FALLBACK_OUTPUT_USD_PER_1M",
+                float(ai_raw.get("fallback_output_usd_per_1m", 12.00)),
+            ),
+            prompt_name=str(ai_raw.get("prompt_name", "listing-analysis")),
+            prompt_version=str(ai_raw.get("prompt_version", "v1.0.0")),
+            prompts_path=str(ai_raw.get("prompts_path", "")),
         ),
         retail=RetailConfig(
             enabled=bool(retail_raw.get("enabled", True)),

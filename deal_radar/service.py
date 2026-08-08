@@ -4,8 +4,12 @@ import logging
 import random
 import time
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
+from deal_radar.ai.budget import BudgetGuard
+from deal_radar.ai.listing_analysis import ListingAnalyzer, content_fingerprint
+from deal_radar.ai.prefilter import REASON_BUDGET, ai_prefilter
 from deal_radar.config import AppConfig
 from deal_radar.bike_identity import configure_identity, identify_listing
 from deal_radar.deal_scoring import DealEvaluator, select_deal_notifications
@@ -63,6 +67,8 @@ class DealRadarService:
         # При 403/429 источник ставится на паузу с экспоненциальным ростом, чтобы
         # не долбить площадку и не спровоцировать блокировку.
         self._source_backoff: dict[str, tuple[float, float]] = {}
+        self._ai_analyzer_cache: ListingAnalyzer | None = None
+        self._ai_setup_logged = False
 
     def close(self) -> None:
         self.storage.close()
@@ -200,6 +206,155 @@ class DealRadarService:
         if self.config.retail.codex_enabled:
             LOGGER.warning("DEAL_RADAR_CODEX_ENABLED is ignored in stage 1.2; runtime AI is disabled")
         return NewBikePriceService(self.config.retail, sources, resolver=None)
+
+    def _ai_analyzer(self) -> ListingAnalyzer | None:
+        """Анализатор Level 1 или ``None``, если AI выключен либо не настроен.
+
+        Отсутствие ключа — не повод останавливать парсер (раздел 15 ТЗ):
+        сообщаем один раз, называя переменную окружения, и работаем дальше.
+        """
+
+        config = self.config.ai
+        if not config.enabled:
+            return None
+        if not config.api_key:
+            if not self._ai_setup_logged:
+                LOGGER.error(
+                    "AI analysis is enabled but OPENAI_API_KEY is empty; "
+                    "set it in the deployment environment or turn AI_ANALYSIS_ENABLED off"
+                )
+                self._ai_setup_logged = True
+            return None
+        if self._ai_analyzer_cache is None:
+            try:
+                self._ai_analyzer_cache = ListingAnalyzer(config)
+            except Exception:
+                if not self._ai_setup_logged:
+                    LOGGER.exception("AI analyzer could not be built; the AI stage stays disabled")
+                    self._ai_setup_logged = True
+                return None
+        return self._ai_analyzer_cache
+
+    def _run_ai_analysis(
+        self,
+        analyzed: dict[str, tuple[Listing, ListingAnalysis]],
+        skip_keys: set[str],
+    ) -> dict[str, int]:
+        """Фаза AI Level 1: анализ каждого нового объявления после pre-filter.
+
+        Вызовы уходят в пул потоков, но всё общение с SQLite остаётся здесь, на
+        главном потоке, поэтому соединение ``Storage`` не расшаривается.
+        """
+
+        analyzer = self._ai_analyzer()
+        if analyzer is None:
+            # Пустой словарь, а не нули: при выключенном AI funnel-лог обязан
+            # остаться в точности таким же, каким был до этого этапа.
+            return {}
+        stats = {
+            "ai_calls": 0,
+            "ai_cache_hits": 0,
+            "ai_skipped": 0,
+            "ai_failed": 0,
+            "ai_pending": 0,
+            "ai_cost_usd": 0.0,
+        }
+        config = self.config.ai
+        guard = BudgetGuard(config, self.storage)
+        guard.check()  # предупреждение о бюджете пишется один раз за цикл
+
+        pending: list[tuple[Listing, ListingAnalysis]] = []
+        for key, (listing, analysis) in analyzed.items():
+            prefilter = ai_prefilter(
+                listing,
+                config,
+                identity=analysis.identity,
+                is_duplicate=key in skip_keys,
+            )
+            if not prefilter.passed:
+                analysis.ai_analysis = analyzer.skipped(listing, prefilter)
+                stats["ai_skipped"] += 1
+                continue
+            cached = self.storage.get_cached_ai_analysis(
+                content_hash=content_fingerprint(listing),
+                prompt_name=analyzer.prompt.name,
+                prompt_version=analyzer.prompt.version,
+                schema_version=analyzer.prompt.schema_version,
+                model_name=config.model_primary,
+            )
+            if cached is not None:
+                cached.cache_used = True
+                analysis.ai_analysis = cached
+                stats["ai_cache_hits"] += 1
+                continue
+            pending.append((listing, analysis))
+
+        limit = config.max_calls_per_cycle
+        if limit > 0 and len(pending) > limit:
+            for listing, analysis in pending[limit:]:
+                analysis.ai_analysis = analyzer.pending(listing, "CYCLE_LIMIT")
+                stats["ai_pending"] += 1
+            pending = pending[:limit]
+
+        # Половина интервала опроса — потолок для всей фазы, чтобы зависший API
+        # не съел цикл целиком.
+        deadline = time.monotonic() + max(30.0, self.config.poll_interval_seconds / 2)
+        chunk_size = max(1, config.max_parallel_requests) * 5
+        for start in range(0, len(pending), chunk_size):
+            chunk = pending[start : start + chunk_size]
+            # Бюджет перепроверяется между пачками: за время предыдущей он мог
+            # исчерпаться, и остаток объявлений должен остаться AI_PENDING.
+            budget = guard.state()
+            if budget.stopped or time.monotonic() >= deadline:
+                reason = REASON_BUDGET if budget.stopped else "CYCLE_DEADLINE"
+                for listing, analysis in pending[start:]:
+                    analysis.ai_analysis = analyzer.pending(listing, reason)
+                    stats["ai_pending"] += 1
+                break
+            self._analyze_chunk(analyzer, chunk, stats)
+
+        # Единственное место, где результат фазы попадает в базу: один UPDATE на
+        # объявление вместо записи в каждой ветке выше.
+        for listing, analysis in analyzed.values():
+            if analysis.ai_analysis is not None:
+                self.storage.save_analysis(listing, analysis)
+        return stats
+
+    def _analyze_chunk(
+        self,
+        analyzer: ListingAnalyzer,
+        chunk: list[tuple[Listing, ListingAnalysis]],
+        stats: dict[str, int],
+    ) -> None:
+        workers = min(self.config.ai.max_parallel_requests, len(chunk))
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            futures = {
+                pool.submit(analyzer.analyze, listing, analysis.identity): (listing, analysis)
+                for listing, analysis in chunk
+            }
+            outcomes = []
+            for future, (listing, analysis) in futures.items():
+                try:
+                    outcomes.append((listing, analysis, future.result()))
+                except Exception:
+                    LOGGER.exception("AI analysis crashed for %s; listing stays AI_FAILED", listing.key)
+                    analysis.ai_analysis = analyzer.pending(listing, "AI_ERROR")
+                    analysis.ai_analysis.status = "AI_FAILED"
+                    stats["ai_failed"] += 1
+
+        for listing, analysis, outcome in outcomes:
+            if outcome.call_log:
+                self.storage.log_ai_call(outcome.call_log)
+                stats["ai_calls"] += 1
+                stats["ai_cost_usd"] = round(
+                    stats["ai_cost_usd"] + float(outcome.call_log.get("estimated_total_cost_usd", 0.0)),
+                    6,
+                )
+            analysis.ai_analysis = outcome.analysis
+            if outcome.analysis.status == "AI_OK":
+                self.storage.cache_ai_analysis(listing, outcome.analysis, self.config.ai.cache_ttl_hours)
+            else:
+                stats["ai_failed"] += 1
 
     def _market_finder(self) -> MarketPriceEngine | None:
         config = self.config.market_pricing
@@ -349,6 +504,10 @@ class DealRadarService:
                 analysis.notification_reason = "confirmed_cross_source_duplicate"
             self.storage.save_analysis(listing, analysis)
             analyzed[listing.key] = (listing, analysis)
+
+        # Фаза AI Level 1. В shadow-режиме результат только сохраняется: ни
+        # статусы, ни бюджет скрейпинга, ни Telegram его не читают.
+        ai_stats = self._run_ai_analysis(analyzed, suppress_keys | duplicate_suppressed_keys)
 
         lookup_budget = (
             dynamic_lookup_budget(len(new_listings), self.config.priority)
@@ -571,6 +730,7 @@ class DealRadarService:
         }
         for source, count in market_http_requests.items():
             stats[f"market_http_{source}"] = count
+        stats.update(ai_stats)
         LOGGER.info("Stage 2.2 cycle funnel: %s", stats)
         return stats
 

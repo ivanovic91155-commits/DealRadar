@@ -1,0 +1,218 @@
+{
+  "$comment": "OpenAI strict mode: every property is required and additionalProperties is false at every level. Optional values are expressed as a union with null. `evidence` is an array rather than the free-form map of the spec, because strict mode forbids undeclared keys.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "classification",
+    "identity",
+    "specifications",
+    "condition",
+    "opportunity",
+    "risk",
+    "evidence",
+    "warnings"
+  ],
+  "properties": {
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["is_bicycle", "listing_type", "relevance_confidence"],
+      "properties": {
+        "is_bicycle": {
+          "type": "boolean",
+          "description": "True only for a complete, rideable bicycle."
+        },
+        "listing_type": {
+          "type": "string",
+          "enum": [
+            "COMPLETE_BICYCLE",
+            "FRAME_ONLY",
+            "PARTS",
+            "ACCESSORY",
+            "WANTED",
+            "SERVICE_OR_RENTAL",
+            "OTHER"
+          ]
+        },
+        "relevance_confidence": { "type": "number" }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "brand",
+        "model",
+        "generation",
+        "model_year",
+        "bike_type",
+        "is_electric",
+        "identity_confidence",
+        "manual_identification_needed"
+      ],
+      "properties": {
+        "brand": { "type": ["string", "null"] },
+        "model": {
+          "type": ["string", "null"],
+          "description": "Model line only, without the brand. Null when the ad names no model."
+        },
+        "generation": { "type": ["string", "null"] },
+        "model_year": { "type": ["integer", "null"] },
+        "bike_type": {
+          "type": ["string", "null"],
+          "enum": [
+            "MTB_HARDTAIL",
+            "MTB_FULL",
+            "GRAVEL",
+            "ROAD",
+            "CITY",
+            "TREKKING",
+            "FOLDING",
+            "BMX",
+            "KIDS",
+            "OTHER",
+            null
+          ]
+        },
+        "is_electric": { "type": ["boolean", "null"] },
+        "identity_confidence": { "type": "number" },
+        "manual_identification_needed": { "type": "boolean" }
+      }
+    },
+    "specifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frame_size_raw",
+        "frame_size_normalized",
+        "wheel_size_inches",
+        "frame_material",
+        "fork",
+        "groupset",
+        "brakes"
+      ],
+      "properties": {
+        "frame_size_raw": { "type": ["string", "null"] },
+        "frame_size_normalized": {
+          "type": ["string", "null"],
+          "enum": ["XS", "S", "M", "L", "XL", "XXL", null]
+        },
+        "wheel_size_inches": { "type": ["number", "null"] },
+        "frame_material": {
+          "type": ["string", "null"],
+          "enum": ["ALUMINIUM", "CARBON", "STEEL", "TITANIUM", "OTHER", null]
+        },
+        "fork": { "type": ["string", "null"] },
+        "groupset": { "type": ["string", "null"] },
+        "brakes": {
+          "type": ["string", "null"],
+          "enum": ["HYDRAULIC_DISC", "MECHANICAL_DISC", "RIM", "COASTER", "OTHER", null]
+        }
+      }
+    },
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claimed_condition",
+        "service_needed",
+        "defects",
+        "missing_parts",
+        "condition_confidence"
+      ],
+      "properties": {
+        "claimed_condition": {
+          "type": "string",
+          "enum": ["NEW", "LIKE_NEW", "GOOD", "USED", "WORN", "DAMAGED", "UNKNOWN"]
+        },
+        "service_needed": { "type": ["boolean", "null"] },
+        "defects": { "type": "array", "items": { "type": "string" } },
+        "missing_parts": { "type": "array", "items": { "type": "string" } },
+        "condition_confidence": { "type": "number" }
+      }
+    },
+    "opportunity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seller_urgency", "listing_quality", "hidden_opportunity"],
+      "properties": {
+        "seller_urgency": {
+          "type": "string",
+          "enum": ["LOW", "MEDIUM", "HIGH", "UNKNOWN"]
+        },
+        "listing_quality": {
+          "type": "string",
+          "enum": ["LOW", "MEDIUM", "HIGH"]
+        },
+        "hidden_opportunity": { "type": "boolean" }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "risk_flags",
+        "suspicious_price",
+        "possible_stolen_bike",
+        "possible_scam"
+      ],
+      "properties": {
+        "risk_flags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "PRICE_TOO_LOW",
+              "NO_PHOTOS",
+              "VAGUE_DESCRIPTION",
+              "CONTRADICTORY_INFO",
+              "NO_DOCUMENTS",
+              "SELLER_AVOIDS_DETAILS",
+              "ADVANCE_PAYMENT_REQUESTED",
+              "SHIPPING_ONLY",
+              "EXTERNAL_INSTRUCTIONS"
+            ]
+          }
+        },
+        "suspicious_price": { "type": "boolean" },
+        "possible_stolen_bike": { "type": "boolean" },
+        "possible_scam": { "type": "boolean" }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "description": "Traceability for the key extracted values.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "value", "source", "excerpt"],
+        "properties": {
+          "field": {
+            "type": "string",
+            "enum": [
+              "brand",
+              "model",
+              "generation",
+              "model_year",
+              "bike_type",
+              "is_electric",
+              "frame_size",
+              "wheel_size",
+              "frame_material",
+              "groupset",
+              "condition",
+              "service_needed"
+            ]
+          },
+          "value": { "type": ["string", "null"] },
+          "source": {
+            "type": "string",
+            "enum": ["TITLE", "DESCRIPTION", "PRICE", "NONE"]
+          },
+          "excerpt": { "type": "string" }
+        }
+      }
+    },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  }
+}

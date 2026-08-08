@@ -4,7 +4,13 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
 
+from deal_radar.ai.client import AIUnavailable, OpenAIClient, estimate_cost_usd
+from deal_radar.ai.listing_analysis import ListingAnalyzer
+from deal_radar.ai.prefilter import ai_prefilter
+from deal_radar.ai.prompt_loader import PromptNotFound, load_prompt
+from deal_radar.bike_identity import identify_listing
 from deal_radar.config import load_config, load_dotenv
 from deal_radar.models import Listing
 from deal_radar.service import DealRadarService
@@ -45,7 +51,117 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostic.add_argument("--send-telegram", action="store_true")
     diagnostic.add_argument("--write-state", action="store_true")
     diagnostic.add_argument("--force", action="store_true")
+    ai_check = subparsers.add_parser(
+        "ai-check", help="Check the AI setup; --live sends one tiny structured-output request"
+    )
+    ai_check.add_argument("--live", action="store_true", help="Make one real API call")
+    ai_listing = subparsers.add_parser(
+        "ai-test-listing",
+        help="Analyse one listing with AI; no Telegram, no state changes",
+    )
+    ai_listing.add_argument("--fixture", help="JSON file with title/description/price")
+    ai_listing.add_argument("--title", default="")
+    ai_listing.add_argument("--description", default="")
+    ai_listing.add_argument("--price", type=int, default=None)
     return parser
+
+
+def _ai_check(config, live: bool) -> int:
+    """Диагностика раздела 20 ТЗ. Ключ печатается только как факт наличия."""
+
+    ai = config.ai
+    print(f"AI enabled: {'yes' if ai.enabled else 'no (AI_ANALYSIS_ENABLED)'}")
+    print(f"API key configured: {'yes' if ai.api_key else 'no (OPENAI_API_KEY)'}")
+    print(f"Shadow mode: {'yes' if ai.shadow_mode else 'no'}")
+    print(f"Primary model configured: {ai.model_primary}")
+    print(f"Fallback model configured: {ai.model_fallback if ai.fallback_enabled else 'disabled'}")
+    print(f"Daily budget: ${ai.daily_budget_usd:.2f} (stop at budget: {ai.stop_at_budget})")
+    try:
+        bundle = load_prompt(ai.prompt_name, ai.prompt_version, ai.prompts_path)
+    except PromptNotFound as exc:
+        print(f"Prompt version: FAILED — {exc}")
+        return 1
+    print(f"Prompt version: {bundle.label}")
+    print(f"Schema version: {bundle.schema_version}")
+    if not ai.api_key:
+        print("Structured Output test: skipped (no API key)")
+        return 1
+    if not live:
+        print("Structured Output test: skipped (pass --live to make one real request)")
+        return 0
+    try:
+        result = OpenAIClient(ai).structured(
+            system="Return JSON that matches the schema. This is a connectivity probe.",
+            user='Report ok=true. DATA: {"probe": true}',
+            schema_name="probe",
+            schema={
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["ok"],
+                "properties": {"ok": {"type": "boolean"}},
+            },
+            max_output_tokens=64,
+        )
+    except AIUnavailable as exc:
+        print(f"Structured Output test: FAILED — {exc}")
+        return 1
+    cost = estimate_cost_usd(
+        ai,
+        used_fallback=result.used_fallback,
+        input_tokens=result.input_tokens,
+        cached_input_tokens=result.cached_input_tokens,
+        output_tokens=result.output_tokens,
+    )
+    print(f"Structured Output test: passed ({result.model_name}, {result.total_tokens} tokens, ${cost:.6f})")
+    return 0
+
+
+def _ai_test_listing(config, args) -> int:
+    """Безопасный прогон одного объявления: без Telegram и без записи в БД."""
+
+    data = {"title": args.title, "description": args.description, "price_czk": args.price}
+    if args.fixture:
+        data.update(json.loads(Path(args.fixture).read_text(encoding="utf-8")))
+    if not data.get("title"):
+        print("Provide --fixture or --title")
+        return 1
+    listing = Listing(
+        source="manual",
+        external_id="ai-test-listing",
+        title=str(data["title"]),
+        description=str(data.get("description", "")),
+        url="https://example.invalid/manual-ai-test",
+        profile="manual",
+        price_czk=data.get("price_czk"),
+        location=data.get("location"),
+    )
+    identity = identify_listing(listing)
+    prefilter = ai_prefilter(listing, config.ai, identity=identity)
+    print(json.dumps({"prefilter": prefilter.to_dict()}, ensure_ascii=False, indent=2))
+    if not prefilter.passed:
+        print("Listing rejected before the API call; nothing was spent.")
+        return 0
+    try:
+        analyzer = ListingAnalyzer(config.ai)
+    except PromptNotFound as exc:
+        print(f"Prompt could not be loaded: {exc}")
+        return 1
+    outcome = analyzer.analyze(listing, identity)
+    print(json.dumps(outcome.analysis.to_dict(), ensure_ascii=False, indent=2))
+    log = outcome.call_log or {}
+    print(
+        "tokens: input={input_tokens} cached={cached_input_tokens} output={output_tokens} "
+        "| cost: ${estimated_total_cost_usd:.6f} | model: {model_name} | {latency_ms} ms".format(
+            input_tokens=log.get("input_tokens", 0),
+            cached_input_tokens=log.get("cached_input_tokens", 0),
+            output_tokens=log.get("output_tokens", 0),
+            estimated_total_cost_usd=float(log.get("estimated_total_cost_usd", 0.0)),
+            model_name=log.get("model_name", ""),
+            latency_ms=log.get("latency_ms", 0),
+        )
+    )
+    print("No Telegram message was sent and no production data was changed.")
+    return 0 if outcome.analysis.status == "AI_OK" else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,6 +192,13 @@ def main(argv: list[str] | None = None) -> int:
         message_id = client.send_text("✅ <b>Deal Radar подключен</b>\nTelegram-канал работает.")
         print(f"Test message sent (message_id={message_id})")
         return 0
+
+    # Обе AI-команды работают без DealRadarService: они не открывают базу и не
+    # меняют production-данные (раздел 20 ТЗ).
+    if args.command == "ai-check":
+        return _ai_check(config, args.live)
+    if args.command == "ai-test-listing":
+        return _ai_test_listing(config, args)
 
     service = DealRadarService(config)
     try:

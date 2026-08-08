@@ -395,6 +395,143 @@ class DealEvaluation:
         return cls(**{key: value for key, value in data.items() if key in allowed})
 
 
+def _filtered(cls: type, data: dict[str, Any]) -> Any:
+    """Собрать датакласс, отбросив незнакомые ключи (общий помощник AI-блоков)."""
+    allowed = {item.name for item in fields(cls)}
+    return cls(**{key: value for key, value in data.items() if key in allowed})
+
+
+@dataclass(slots=True)
+class AIClassification:
+    is_bicycle: bool = False
+    listing_type: str = "UNKNOWN"
+    relevance_confidence: float = 0.0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AIClassification":
+        return _filtered(cls, data)
+
+
+@dataclass(slots=True)
+class AIIdentity:
+    """Предложение модели от AI. Подтверждает его только каталог этапа 1."""
+
+    brand: str | None = None
+    model: str | None = None
+    generation: str | None = None
+    model_year: int | None = None
+    bike_type: str | None = None
+    is_electric: bool | None = None
+    identity_confidence: float = 0.0
+    manual_identification_needed: bool = True
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AIIdentity":
+        return _filtered(cls, data)
+
+
+@dataclass(slots=True)
+class AISpecifications:
+    frame_size_raw: str | None = None
+    frame_size_normalized: str | None = None
+    wheel_size_inches: float | None = None
+    frame_material: str | None = None
+    fork: str | None = None
+    groupset: str | None = None
+    brakes: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AISpecifications":
+        return _filtered(cls, data)
+
+
+@dataclass(slots=True)
+class AICondition:
+    claimed_condition: str = "UNKNOWN"
+    service_needed: bool | None = None
+    defects: list[str] = field(default_factory=list)
+    missing_parts: list[str] = field(default_factory=list)
+    condition_confidence: float = 0.0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AICondition":
+        return _filtered(cls, data)
+
+
+@dataclass(slots=True)
+class AIOpportunity:
+    seller_urgency: str = "UNKNOWN"
+    listing_quality: str = "UNKNOWN"
+    hidden_opportunity: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AIOpportunity":
+        return _filtered(cls, data)
+
+
+@dataclass(slots=True)
+class AIRisk:
+    risk_flags: list[str] = field(default_factory=list)
+    suspicious_price: bool = False
+    possible_stolen_bike: bool = False
+    possible_scam: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AIRisk":
+        return _filtered(cls, data)
+
+
+@dataclass(slots=True)
+class AIAnalysis:
+    """Результат AI Analysis Level 1 вместе с метаданными вызова."""
+
+    status: str = "AI_PENDING"  # AI_OK | AI_PENDING | AI_FAILED | AI_SKIPPED
+    schema_version: str = ""
+    prompt_name: str = ""
+    prompt_version: str = ""
+    model_name: str = ""
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    content_hash: str = ""
+    classification: AIClassification | None = None
+    identity: AIIdentity | None = None
+    specifications: AISpecifications | None = None
+    condition: AICondition | None = None
+    opportunity: AIOpportunity | None = None
+    risk: AIRisk | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    skip_reason_code: str = ""
+    catalog_confirmed_model: str = ""
+    catalog_model_source: str = ""
+    cache_used: bool = False
+    used_fallback: bool = False
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    output_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    latency_ms: int = 0
+    error_type: str = ""
+    error_message_safe: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AIAnalysis":
+        copy = dict(data)
+        for key, block in (
+            ("classification", AIClassification),
+            ("identity", AIIdentity),
+            ("specifications", AISpecifications),
+            ("condition", AICondition),
+            ("opportunity", AIOpportunity),
+            ("risk", AIRisk),
+        ):
+            if isinstance(copy.get(key), dict):
+                copy[key] = block.from_dict(copy[key])
+        return _filtered(cls, copy)
+
+
 @dataclass(slots=True)
 class ListingAnalysis:
     preliminary_priority_score: int
@@ -412,6 +549,7 @@ class ListingAnalysis:
     duplicate_alternatives: list[dict[str, str]] = field(default_factory=list)
     market_valuation: MarketValuation | None = None
     deal_evaluation: DealEvaluation | None = None
+    ai_analysis: AIAnalysis | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -429,5 +567,7 @@ class ListingAnalysis:
             copy["market_valuation"] = MarketValuation.from_dict(copy["market_valuation"])
         if isinstance(copy.get("deal_evaluation"), dict):
             copy["deal_evaluation"] = DealEvaluation.from_dict(copy["deal_evaluation"])
+        if isinstance(copy.get("ai_analysis"), dict):
+            copy["ai_analysis"] = AIAnalysis.from_dict(copy["ai_analysis"])
         allowed = {item.name for item in fields(cls)}
         return cls(**{key: value for key, value in copy.items() if key in allowed})

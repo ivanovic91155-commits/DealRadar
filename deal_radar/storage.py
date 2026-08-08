@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from deal_radar.bike_identity import has_accessory_terms, identify_listing, normalize_text
 from deal_radar.config import PriorityConfig
@@ -20,6 +21,7 @@ from deal_radar.duplicates import (
     text_similarity,
 )
 from deal_radar.models import (
+    AIAnalysis,
     DealCosts,
     DealEvaluation,
     Listing,
@@ -254,6 +256,48 @@ class Storage:
             ON deal_evaluations(listing_source, listing_external_id, id DESC);
             CREATE INDEX IF NOT EXISTS deal_evaluations_status_score_idx
             ON deal_evaluations(status, deal_score DESC);
+            CREATE TABLE IF NOT EXISTS ai_analysis_cache (
+                content_hash TEXT NOT NULL,
+                prompt_name TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                schema_version TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                listing_source TEXT NOT NULL,
+                listing_external_id TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                PRIMARY KEY (content_hash, prompt_name, prompt_version, schema_version, model_name)
+            );
+            CREATE TABLE IF NOT EXISTS ai_call_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id TEXT NOT NULL,
+                listing_source TEXT NOT NULL,
+                listing_external_id TEXT NOT NULL,
+                analysis_type TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                prompt_name TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                schema_version TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                cached_input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                total_tokens INTEGER NOT NULL,
+                estimated_input_cost_usd REAL NOT NULL,
+                estimated_output_cost_usd REAL NOT NULL,
+                estimated_total_cost_usd REAL NOT NULL,
+                attempt_number INTEGER NOT NULL,
+                used_fallback INTEGER NOT NULL DEFAULT 0,
+                success INTEGER NOT NULL DEFAULT 0,
+                error_type TEXT NOT NULL DEFAULT '',
+                error_message_safe TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS ai_call_log_started_idx ON ai_call_log(started_at);
+            CREATE INDEX IF NOT EXISTS ai_call_log_listing_idx
+            ON ai_call_log(listing_source, listing_external_id, id DESC);
             """
         )
         feedback_columns = {
@@ -1296,3 +1340,118 @@ class Storage:
                 """,
                 (normalized_model_key, json.dumps(valuation.to_dict(), ensure_ascii=False), expires_at),
             )
+
+    def get_cached_ai_analysis(
+        self,
+        *,
+        content_hash: str,
+        prompt_name: str,
+        prompt_version: str,
+        schema_version: str,
+        model_name: str,
+    ) -> AIAnalysis | None:
+        """Кэш из раздела 17 ТЗ: не платить дважды за неизменившееся объявление."""
+
+        row = self.connection.execute(
+            """
+            SELECT data_json, expires_at FROM ai_analysis_cache
+            WHERE content_hash = ? AND prompt_name = ? AND prompt_version = ?
+              AND schema_version = ? AND model_name = ?
+            """,
+            (content_hash, prompt_name, prompt_version, schema_version, model_name),
+        ).fetchone()
+        if not row:
+            return None
+        if datetime.fromisoformat(row["expires_at"]) <= datetime.now(UTC):
+            with self.connection:
+                self.connection.execute(
+                    """
+                    DELETE FROM ai_analysis_cache
+                    WHERE content_hash = ? AND prompt_name = ? AND prompt_version = ?
+                      AND schema_version = ? AND model_name = ?
+                    """,
+                    (content_hash, prompt_name, prompt_version, schema_version, model_name),
+                )
+            return None
+        return AIAnalysis.from_dict(json.loads(row["data_json"]))
+
+    def cache_ai_analysis(self, listing: Listing, analysis: AIAnalysis, hours: int) -> None:
+        expires_at = (datetime.now(UTC) + timedelta(hours=max(1, hours))).isoformat()
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO ai_analysis_cache (
+                    content_hash, prompt_name, prompt_version, schema_version, model_name,
+                    listing_source, listing_external_id, data_json, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(content_hash, prompt_name, prompt_version, schema_version, model_name)
+                DO UPDATE SET
+                    listing_source = excluded.listing_source,
+                    listing_external_id = excluded.listing_external_id,
+                    data_json = excluded.data_json,
+                    created_at = excluded.created_at,
+                    expires_at = excluded.expires_at
+                """,
+                (
+                    analysis.content_hash,
+                    analysis.prompt_name,
+                    analysis.prompt_version,
+                    analysis.schema_version,
+                    analysis.model_name,
+                    listing.source,
+                    listing.external_id,
+                    json.dumps(analysis.to_dict(), ensure_ascii=False),
+                    datetime.now(UTC).isoformat(),
+                    expires_at,
+                ),
+            )
+
+    def log_ai_call(self, record: dict[str, Any]) -> None:
+        """Журнал раздела 16 ТЗ. Ключ, заголовки и тело запроса сюда не попадают."""
+
+        defaults: dict[str, Any] = {
+            "request_id": "",
+            "listing_source": "",
+            "listing_external_id": "",
+            "analysis_type": "listing-analysis",
+            "model_name": "",
+            "prompt_name": "",
+            "prompt_version": "",
+            "schema_version": "",
+            "started_at": "",
+            "finished_at": "",
+            "latency_ms": 0,
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "estimated_input_cost_usd": 0.0,
+            "estimated_output_cost_usd": 0.0,
+            "estimated_total_cost_usd": 0.0,
+            "attempt_number": 1,
+            "used_fallback": 0,
+            "success": 0,
+            "error_type": "",
+            "error_message_safe": "",
+        }
+        columns = tuple(defaults)
+        placeholders = ", ".join("?" for _ in columns)
+        with self.connection:
+            self.connection.execute(
+                f"INSERT INTO ai_call_log ({', '.join(columns)}) VALUES ({placeholders})",
+                tuple(record.get(column, defaults[column]) for column in columns),
+            )
+
+    def ai_spend_usd_since(self, moment: datetime) -> float:
+        row = self.connection.execute(
+            "SELECT COALESCE(SUM(estimated_total_cost_usd), 0) AS spent FROM ai_call_log WHERE started_at >= ?",
+            (moment.astimezone(UTC).isoformat(),),
+        ).fetchone()
+        return float(row["spent"] or 0.0)
+
+    def ai_call_count_since(self, moment: datetime) -> int:
+        row = self.connection.execute(
+            "SELECT COUNT(*) AS calls FROM ai_call_log WHERE started_at >= ?",
+            (moment.astimezone(UTC).isoformat(),),
+        ).fetchone()
+        return int(row["calls"] or 0)
