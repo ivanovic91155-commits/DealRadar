@@ -208,7 +208,7 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual(result.identity.model, "Marlin 7")
         self.assertEqual(result.condition.claimed_condition, "GOOD")
         self.assertEqual(result.schema_version, "dealradar.ai-analysis.v1")
-        self.assertEqual(result.prompt_version, "v1.0.0")
+        self.assertEqual(result.prompt_version, "v1.1.0")
         self.assertGreater(result.estimated_cost_usd, 0)
 
     def test_call_log_carries_the_documented_fields(self) -> None:

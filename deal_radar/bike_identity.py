@@ -23,6 +23,7 @@ __all__ = [
 
 
 BRANDS = {
+    "4ever": "4EVER",
     "author": "Author",
     "banshee": "Banshee",
     "bergamont": "Bergamont",
@@ -95,6 +96,19 @@ FRAME_WHEEL_CONFUSION_RE = re.compile(
     r"\b(?:vel(?:ikost)?\.?|size|maat)\s*(?:kol[ao]?|wheels?|wielen)\b",
     re.IGNORECASE,
 )
+# Обратная путаница: 'vel. 16"' и 'velikost ramu 16"' — это РАМА, а не колёса.
+# Без этой проверки первое же число с кавычкой объявляется колёсным размером,
+# и женский Merida с рамой 16" получает "колёса 16"" вместо реальных 26".
+FRAME_MARKER_BEFORE_RE = re.compile(
+    r"(?:vel(?:ikost)?\.?|size|ram(?:u|ec)?|frame(?:maat)?|rahmen(?:gro(?:sse|ße))?"
+    r"|gro(?:sse|ße)|gr\.?|maat)\s*(?:kola?|ramu|frame)?\s*[:.-]?\s*$",
+    re.IGNORECASE,
+)
+# Явный колёсный контекст: "na 26 kolech", "26 kola", "kola 26", "26 wheels".
+WHEEL_MARKER_AFTER_RE = re.compile(r"^\s*(?:kol[aeo]?(?:ch|y)?|palc|wheels?|wielen)\b", re.IGNORECASE)
+# "kol" без гласной на конце — это "velikost kol 26", тоже колёса. Проверяется
+# раньше рамочного маркера, иначе "velikost" перетянет одеяло на себя.
+WHEEL_MARKER_BEFORE_RE = re.compile(r"\b(?:kol[ao]?|kolech|wheels?|wielen)\s*(?:o\s*)?$", re.IGNORECASE)
 # Числовые размеры рамы валидны только как ростовка: дюймы 13-23 или см 38-62.
 # Всё, что похоже на колёса (24/26/27/28/29), рамой быть не может.
 WHEEL_LIKE_SIZES = {"24", "26", "27", "28", "29"}
@@ -105,6 +119,7 @@ GENERIC_WORDS = {
     "bike", "bicycle", "bicykl", "cyklo", "e", "elektrokolo", "ebike", "e-bike", "horsky", "horske",
     "jizdni", "kolo", "kola", "mtb", "detske", "detsky", "divci", "damske", "panske", "prodám",
     "alu", "hlinikovy", "prodam", "prodej", "model", "novy", "nove", "zanovni", "v", "vel", "velikost",
+    "kol", "kolech", "palec", "palcu", "palce", "palcove", "palcova", "rada", "modelova",
     "ram", "ramu", "frame", "size", "zaruce", "rahmen", "rahmengrosse", "grosse", "gr",
     "maat", "framemaat", "framematen", "divers", "kleuren", "en", "herren", "damen",
     "mountain", "road", "gravel", "city", "hardtail",
@@ -172,15 +187,39 @@ def configure_identity(config: IdentityConfig) -> None:
     bike_catalog.clear_cache()
 
 
+def _wheel_size(text: str) -> str:
+    """Размер колёс с оглядкой на контекст вокруг числа.
+
+    Наивное «первое совпадение» ломается на обычном чешском объявлении:
+    в 'Dámské horské kolo MERIDA (vel. 16") ... jezdí na klasických 26" kolech'
+    первым идёт размер РАМЫ. Поэтому кандидаты с рамочным маркером слева
+    отбрасываются, а кандидат с явным колёсным контекстом побеждает даже если
+    стоит позже.
+    """
+
+    fallback = ""
+    for match in WHEEL_RE.finditer(text):
+        value = (match.group(1) or match.group(2) or "").replace(",", ".")
+        if not value:
+            continue
+        before = text[max(0, match.start() - 24) : match.start()]
+        after = text[match.end() : match.end() + 12]
+        if WHEEL_MARKER_AFTER_RE.match(after) or WHEEL_MARKER_BEFORE_RE.search(before):
+            return value
+        if FRAME_MARKER_BEFORE_RE.search(before):
+            continue
+        if not fallback:
+            fallback = value
+    return fallback
+
+
 def _attribute_values(text: str) -> tuple[str, int | None, str, str]:
     generation_match = GENERATION_RE.search(text)
     year_match = YEAR_RE.search(text)
-    wheel_match = WHEEL_RE.search(text)
     frame_match = FRAME_RE.search(text)
     generation = f"Gen {generation_match.group(1)}" if generation_match else ""
     year = int(year_match.group(1)) if year_match else None
-    wheel_value = (wheel_match.group(1) or wheel_match.group(2)) if wheel_match else ""
-    wheel = wheel_value.replace(",", ".") if wheel_value else ""
+    wheel = _wheel_size(text)
     frame = frame_match.group(1).upper() if frame_match else ""
     # Защита от путаницы колёс и рамы:
     # 1) числовой "размер рамы", совпадающий с колёсным (26/28/29) — это колёса

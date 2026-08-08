@@ -163,7 +163,7 @@ class AIConfig:
     fallback_cached_input_usd_per_1m: float = 0.20
     fallback_output_usd_per_1m: float = 12.00
     prompt_name: str = "listing-analysis"
-    prompt_version: str = "v1.0.0"
+    prompt_version: str = "v1.1.0"
     prompts_path: str = ""  # пусто -> каталог, поставляемый вместе с пакетом
 
     def validate(self) -> None:
@@ -627,6 +627,9 @@ class AppConfig:
     max_initial_notifications: int = 1
     max_notifications_per_run: int = 10
     request_timeout_seconds: int = 30
+    # Cyklobazar отдаёт в списке только обрывок описания; характеристики лежат
+    # на странице объявления. Потолок запросов за цикл — защита от бана.
+    cyklobazar_detail_budget: int = 20
     profiles: list[SearchProfile] = field(default_factory=list)
     cyklobazar_profiles: list[CyklobazarProfile] = field(default_factory=list)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
@@ -644,6 +647,8 @@ class AppConfig:
             raise ValueError("poll_interval_seconds must be between 60 and 86400")
         if not 2 <= self.feedback_poll_interval_seconds <= 300:
             raise ValueError("feedback_poll_interval_seconds must be between 2 and 300")
+        if not 0 <= self.cyklobazar_detail_budget <= 100:
+            raise ValueError("cyklobazar_detail_budget must be between 0 and 100")
         if not self.profiles and not any(profile.enabled for profile in self.cyklobazar_profiles):
             raise ValueError("At least one marketplace search profile is required")
         for profile in self.profiles:
@@ -684,6 +689,9 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
         bootstrap_mode=raw.get("bootstrap_mode", "send_latest"),
         max_initial_notifications=int(raw.get("max_initial_notifications", 1)),
         max_notifications_per_run=int(raw.get("max_notifications_per_run", 10)),
+        cyklobazar_detail_budget=_env_int(
+            "CYKLOBAZAR_DETAIL_BUDGET", int(raw.get("cyklobazar_detail_budget", 20))
+        ),
         request_timeout_seconds=int(raw.get("request_timeout_seconds", 30)),
         profiles=[SearchProfile(**profile) for profile in raw.get("profiles", [])],
         cyklobazar_profiles=[
@@ -770,7 +778,7 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
                 float(ai_raw.get("fallback_output_usd_per_1m", 12.00)),
             ),
             prompt_name=str(ai_raw.get("prompt_name", "listing-analysis")),
-            prompt_version=str(ai_raw.get("prompt_version", "v1.0.0")),
+            prompt_version=str(ai_raw.get("prompt_version", "v1.1.0")),
             prompts_path=str(ai_raw.get("prompts_path", "")),
         ),
         retail=RetailConfig(

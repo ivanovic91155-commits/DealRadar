@@ -451,6 +451,28 @@ class Storage:
                 ),
             )
 
+    def update_listing_description(self, listing: Listing) -> None:
+        """Переписать data_json объявления после догрузки детальной страницы.
+
+        Описание сохраняется, чтобы следующий цикл не платил за тот же HTTP-запрос
+        и чтобы отпечаток содержимого для AI-кэша не прыгал между запусками.
+        """
+
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE listings
+                SET data_json = ?, description_fingerprint = ?
+                WHERE source = ? AND external_id = ?
+                """,
+                (
+                    json.dumps(listing.to_dict(), ensure_ascii=False),
+                    description_fingerprint(listing.description),
+                    listing.source,
+                    listing.external_id,
+                ),
+            )
+
     def get_analysis(self, source: str, external_id: str) -> ListingAnalysis | None:
         row = self.connection.execute(
             "SELECT analysis_json FROM listings WHERE source = ? AND external_id = ?",

@@ -6,6 +6,7 @@
   "max_initial_notifications": 1,
   "max_notifications_per_run": 10,
   "request_timeout_seconds": 30,
+  "cyklobazar_detail_budget": 20,
   "profiles": [
     {
       "name": "Велосипеды — Прага + 50 км",
@@ -84,7 +85,7 @@
     "fallback_cached_input_usd_per_1m": 0.2,
     "fallback_output_usd_per_1m": 12.0,
     "prompt_name": "listing-analysis",
-    "prompt_version": "v1.0.0",
+    "prompt_version": "v1.1.0",
     "prompts_path": ""
   },
   "retail": {

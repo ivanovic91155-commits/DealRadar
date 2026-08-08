@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -116,14 +117,70 @@ def _relative_time(published_at) -> str:
     return f"{days} дн назад"
 
 
-def _spec_lines(identity, listing) -> list[str]:
-    """Характеристики велосипеда, каждая с новой строки. Рама показывается
-    только если распознана; колёса критичны — если нет, явно предупреждаем."""
+AUDIENCE_LABELS = {"kids": "детский", "women": "женский"}
+# Цена в конце заголовка ("... super stav: 6 500") дублирует строку 💰 ниже.
+TITLE_PRICE_SUFFIX_RE = re.compile(r"\s*[:\-–]\s*\d[\d\s., ]*(?:kc|kč|czk)?\s*$", re.IGNORECASE)
+
+
+def _ai_specs(analysis):
+    """Блок характеристик от AI или None. AI читает описание целиком, поэтому
+    закрывает поля, которые регулярки по заголовку не достали."""
+    ai = getattr(analysis, "ai_analysis", None)
+    if ai is None or ai.status != "AI_OK":
+        return None, None
+    return ai.identity, ai.specifications
+
+
+def _headline(analysis, listing) -> str:
+    """Название велосипеда: модель и специфика, без цены и размеров.
+
+    Заголовок объявления продавец пишет как придётся — с ценой, состоянием и
+    размером рамы вперемешку. В карточке из него нужна только модель, поэтому
+    сырой текст используется лишь как запасной вариант.
+    """
+
+    identity = analysis.identity
+    ai_identity, _ = _ai_specs(analysis)
+    brand = identity.brand if identity else ""
+    model = identity.model if identity else ""
+    if not model and ai_identity and ai_identity.model:
+        brand = brand or (ai_identity.brand or "")
+        model = ai_identity.model
+    name = " ".join(part for part in (brand, model) if part).strip()
+    if not name:
+        name = TITLE_PRICE_SUFFIX_RE.sub("", listing.title).strip()[:70]
+
+    tags: list[str] = []
+    audience = identity.audience if identity else ""
+    if audience in AUDIENCE_LABELS:
+        tags.append(AUDIENCE_LABELS[audience])
+    electric = identity.electric if identity else None
+    if not electric and ai_identity is not None:
+        electric = ai_identity.is_electric
+    if electric:
+        tags.append("электро")
+    if tags:
+        name = f"{name} · {' · '.join(tags)}"
+    return html.escape(name)
+
+
+def _spec_lines(analysis, listing) -> list[str]:
+    """Характеристики велосипеда, каждая с новой строки. Значения, которых нет
+    у детерминированного разбора, подставляются из AI — она видела описание."""
+    identity = analysis.identity
+    _, ai_specs = _ai_specs(analysis)
     lines = []
-    if identity and identity.frame_size:
-        lines.append(f"📐 Рама {html.escape(identity.frame_size)}")
-    if identity and identity.wheel_size:
-        wheel = identity.wheel_size
+    frame = identity.frame_size if identity else ""
+    if not frame and ai_specs:
+        frame = ai_specs.frame_size_normalized or ai_specs.frame_size_raw or ""
+    if frame:
+        # Числовая ростовка задаётся в дюймах ("16"), буквенная — как есть ("M").
+        frame_label = f'{frame}"' if re.fullmatch(r"\d{2}(?:[.,]\d)?", str(frame)) else str(frame)
+        lines.append(f"📐 Рама {html.escape(frame_label)}")
+    wheel = identity.wheel_size if identity else ""
+    if not wheel and ai_specs and ai_specs.wheel_size_inches:
+        wheel = str(ai_specs.wheel_size_inches)
+    if wheel:
         wheel_label = wheel if '"' in wheel else f'{wheel}"'
         lines.append(f'🛞 Колёса {html.escape(wheel_label)}')
     else:
@@ -204,15 +261,14 @@ def _analysis_card_text(
 
     lines.append("")
 
-    # --- Название (модель) ---
-    title = html.escape(listing.title[:120])
-    lines.append(f"🚲 <b>{title}</b>")
+    # --- Название: только модель и специфика ---
+    lines.append(f"🚲 <b>{_headline(analysis, listing)}</b>")
 
-    # --- Площадка ---
+    lines.append("")
+
+    # --- Площадка и характеристики: рама / колёса / локация / возраст ---
     lines.append(f"🏪 {html.escape(marketplace)}")
-
-    # --- Характеристики: рама / колёса / локация / возраст, каждая с новой строки ---
-    lines.extend(_spec_lines(identity, listing))
+    lines.extend(_spec_lines(analysis, listing))
 
     lines.append("")
 
@@ -238,6 +294,7 @@ def _analysis_card_text(
                 src = SOURCE_LABELS.get(item.source, item.source)
                 used_links.append(f'<a href="{html.escape(item.url, quote=True)}">{html.escape(src)} ↗</a>')
         if used_links:
+            lines.append("")
             lines.append("🔁 Аналоги б/у: " + " · ".join(used_links))
 
     # --- Плюсы и предупреждения одной-двумя строками ---

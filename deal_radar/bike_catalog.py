@@ -22,6 +22,7 @@ DEFAULT_CATALOG_PATH = Path(__file__).with_name("data") / "bike_catalog.json"
 
 # Номер комплектации сразу после названия модели: "Marlin 7", "Scale 970", "Aim 29er".
 VARIANT_RE = re.compile(r"\d{1,4}(?:\.\d)?[a-z]{0,2}")
+MEASUREMENT_UNITS = frozenset({"cm", "mm", "kg", "km", "palcu", "palce", "palec", "inch"})
 NUMERIC_ALIAS_RE = re.compile(r"\d+(?:\.\d+)?")
 MIN_FUZZY_ALIAS_LENGTH = 4
 
@@ -133,6 +134,12 @@ def _variant_after(text: str, end: int, stop_tokens: frozenset[str]) -> str:
     if not token or token in stop_tokens:
         return ""
     if not VARIANT_RE.fullmatch(token):
+        return ""
+    # "Sauron vel. S (150-165 cm)" — рост ездока, а не вариант модели. Число,
+    # за которым идёт ещё одно число или единица измерения, вариантом не бывает:
+    # настоящие варианты ("Marlin 7", "Juliet 7.100") стоят особняком.
+    following = tail[1].strip(".-") if len(tail) > 1 else ""
+    if following in MEASUREMENT_UNITS or VARIANT_RE.fullmatch(following or "x"):
         return ""
     return token
 

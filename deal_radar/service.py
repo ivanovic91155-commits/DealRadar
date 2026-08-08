@@ -14,7 +14,7 @@ from deal_radar.config import AppConfig
 from deal_radar.bike_identity import configure_identity, identify_listing
 from deal_radar.deal_scoring import DealEvaluator, select_deal_notifications
 from deal_radar.exchange_rates import ExchangeRateProvider
-from deal_radar.http import get_bytes
+from deal_radar.http import HttpError, get_bytes
 from deal_radar.market_pricing import MarketPriceEngine
 from deal_radar.market_sources import (
     BazosCzechMarketSource,
@@ -396,6 +396,49 @@ class DealRadarService:
         )
         return parse_detail_description(detail)
 
+    def _enrich_cyklobazar_descriptions(self, new_listings: list[Listing]) -> int:
+        """Догрузить полное описание с детальной страницы Cyklobazar.
+
+        В списке площадка отдаёт только обрывок, а характеристики — материал
+        рамы, вилка, трансмиссия, размер колёс — живут на странице объявления.
+        Без них по этому источнику пусто и у каталога, и у AI: в карточке
+        остаётся один заголовок.
+
+        Запросы ограничены бюджетом на цикл, а первая же HTTP-ошибка обрывает
+        догрузку — при 403 от Cloudflare продолжать значит напрашиваться на бан.
+        """
+
+        budget = self.config.cyklobazar_detail_budget
+        if budget <= 0:
+            return 0
+        candidates = [item for item in new_listings if item.source == "cyklobazar"]
+        enriched = 0
+        for index, listing in enumerate(candidates[:budget]):
+            if index:
+                time.sleep(0.5)
+            try:
+                description = self._duplicate_detail_description(listing)
+            except HttpError as exc:
+                LOGGER.warning(
+                    "Cyklobazar detail fetch stopped after %d of %d listings: %s",
+                    enriched,
+                    len(candidates),
+                    exc,
+                )
+                break
+            if len(description) <= len(listing.description):
+                continue
+            listing.description = description[:2000]
+            self.storage.update_listing_description(listing)
+            enriched += 1
+        if len(candidates) > budget:
+            LOGGER.info(
+                "Cyklobazar detail budget spent: %d of %d new listings enriched",
+                enriched,
+                len(candidates),
+            )
+        return enriched
+
     def collect_feedback(self, telegram: TelegramClient | None = None) -> int:
         if not self.config.telegram.bot_token:
             return 0
@@ -442,6 +485,8 @@ class DealRadarService:
                 suppress_keys = {listing.key for listing in listings if listing.key not in allowed}
         new_listings = self.storage.register_new(listings, suppress_keys)
         inserted = len(new_listings)
+        # Описание догружается до анализа: и каталог, и AI читают уже полный текст.
+        detail_fetches = self._enrich_cyklobazar_descriptions(new_listings)
         duplicate_stats = self.storage.backfill_duplicates(
             self.config.priority,
             description_loader=self._duplicate_detail_description,
@@ -719,6 +764,7 @@ class DealRadarService:
             "feedback": feedback_count,
             "duplicate_groups": duplicate_stats["groups"],
             "confirmed_duplicate_suppressed": len(duplicate_suppressed_keys),
+            "cyklobazar_detail_fetches": detail_fetches,
             "market_evaluated": sum(item.market_price_czk is not None for item in market_values),
             "market_high": sum(item.confidence == "high" for item in market_values),
             "market_medium": sum(item.confidence == "medium" for item in market_values),

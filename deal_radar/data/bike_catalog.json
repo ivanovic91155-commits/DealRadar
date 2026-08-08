@@ -171,7 +171,34 @@
         {"name": "eOne-Sixty", "electric": true, "aliases": ["eone sixty", "eonesixty"]},
         {"name": "eBig Nine", "electric": true, "aliases": ["ebig nine"]},
         {"name": "Matts"},
+        {"name": "Juliet", "audience": "women"},
         {"name": "Dakar", "audience": "kids"}
+      ]
+    },
+    "4ever": {
+      "models": [
+        {"name": "Sauron"},
+        {"name": "Frontbee"},
+        {"name": "Winride"},
+        {"name": "Scanner"},
+        {"name": "Scanner Lady", "audience": "women", "aliases": ["scanner lady"]},
+        {"name": "Firetrack"},
+        {"name": "Sabathon"},
+        {"name": "Graffiti"},
+        {"name": "Hot-Shot", "aliases": ["hot shot", "hotshot"]},
+        {"name": "Red-Hot", "aliases": ["red hot", "redhot"]},
+        {"name": "Red-Hot Lady", "audience": "women", "aliases": ["red hot lady", "redhot lady"]},
+        {"name": "Virus"},
+        {"name": "Inexxis"},
+        {"name": "Skybird"},
+        {"name": "Victory"},
+        {"name": "Hazard"},
+        {"name": "Yoga"},
+        {"name": "Melody"},
+        {"name": "Marianne"},
+        {"name": "Mercury"},
+        {"name": "Ennyx"},
+        {"name": "Dark"}
       ]
     },
     "canyon": {
