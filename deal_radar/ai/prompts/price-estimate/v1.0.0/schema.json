@@ -1,0 +1,68 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "market_price_czk",
+    "price_low_czk",
+    "price_high_czk",
+    "confidence",
+    "basis",
+    "reasoning_summary",
+    "price_drivers",
+    "warnings"
+  ],
+  "properties": {
+    "market_price_czk": {
+      "type": "integer",
+      "description": "Realistic private second-hand price in CZK."
+    },
+    "price_low_czk": {
+      "type": "integer",
+      "description": "Lower end of the plausible range in CZK."
+    },
+    "price_high_czk": {
+      "type": "integer",
+      "description": "Upper end of the plausible range in CZK."
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"]
+    },
+    "basis": {
+      "type": "string",
+      "enum": ["SAME_MODEL", "SIMILAR_MODEL", "COMPONENT_CLASS", "GENERIC"]
+    },
+    "reasoning_summary": {
+      "type": "string",
+      "description": "One short sentence naming what drove the number."
+    },
+    "price_drivers": {
+      "type": "array",
+      "description": "Facts from the ad that moved the price, most important first.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["factor", "direction", "excerpt"],
+        "properties": {
+          "factor": {
+            "type": "string",
+            "description": "What it is, e.g. 'battery age', 'Shimano Deore groupset'."
+          },
+          "direction": {
+            "type": "string",
+            "enum": ["RAISES", "LOWERS", "NEUTRAL"]
+          },
+          "excerpt": {
+            "type": "string",
+            "description": "Short quote from the ad supporting this factor."
+          }
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Caveats about this estimate, in plain language."
+    }
+  }
+}

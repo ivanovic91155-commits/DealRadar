@@ -166,6 +166,35 @@ class AIConfig:
     prompt_version: str = "v1.1.0"
     prompts_path: str = ""  # пусто -> каталог, поставляемый вместе с пакетом
 
+    # --- Level 2: AI-оценка цены перепродажи -------------------------------
+    # Отдельный kill switch: извлечение фактов и оценка денег включаются
+    # независимо, потому что риск у них разный.
+    price_estimate_enabled: bool = False
+    # Оценка цены — задача на рассуждение, поэтому модель сильнее, чем на
+    # извлечении фактов. Расход держит кэш по идентичности велосипеда.
+    price_model: str = "gpt-5.6-terra"
+    price_input_usd_per_1m: float = 2.00
+    price_cached_input_usd_per_1m: float = 0.20
+    price_output_usd_per_1m: float = 12.00
+    price_prompt_name: str = "price-estimate"
+    price_prompt_version: str = "v1.0.0"
+    # Цена б/у велосипеда меняется медленно, а кэш ключуется по модели и
+    # состоянию, а не по объявлению — поэтому TTL длинный.
+    price_cache_ttl_hours: int = 720
+    # Запускать оценку, когда реальных аналогов нет вовсе либо их слишком мало.
+    price_min_comparables: int = 3
+    price_on_low_confidence: bool = True
+    # Главный предохранитель: догадка модели не должна становиться сигналом
+    # «ехать покупать». HOT требует подтверждённых аналогов с площадок.
+    price_allow_hot: bool = False
+    # Границы вменяемости ответа: всё за их пределами означает, что модель
+    # неправильно поняла объявление, и такая оценка отбрасывается.
+    price_floor_czk: int = 500
+    price_ceiling_czk: int = 500_000
+    price_max_ratio_to_asking: float = 8.0
+    price_min_ratio_to_asking: float = 0.15
+    price_max_range_ratio: float = 2.5
+
     def validate(self) -> None:
         if urlparse(self.api_base_url).scheme != "https":
             raise ValueError("ai.api_base_url must use HTTPS")
@@ -196,9 +225,26 @@ class AIConfig:
             self.fallback_input_usd_per_1m,
             self.fallback_cached_input_usd_per_1m,
             self.fallback_output_usd_per_1m,
+            self.price_input_usd_per_1m,
+            self.price_cached_input_usd_per_1m,
+            self.price_output_usd_per_1m,
         )
         if any(price < 0 for price in prices):
             raise ValueError("ai token prices must not be negative")
+        if self.price_estimate_enabled and not self.price_model:
+            raise ValueError("ai.price_model must not be empty when price estimates are enabled")
+        if self.price_cache_ttl_hours < 0:
+            raise ValueError("ai.price_cache_ttl_hours must not be negative")
+        if self.price_min_comparables < 0:
+            raise ValueError("ai.price_min_comparables must not be negative")
+        if not 0 < self.price_floor_czk < self.price_ceiling_czk:
+            raise ValueError("ai.price_floor_czk must be positive and below ai.price_ceiling_czk")
+        if not 0 < self.price_min_ratio_to_asking < 1 < self.price_max_ratio_to_asking:
+            raise ValueError(
+                "ai.price_min_ratio_to_asking must be below 1 and ai.price_max_ratio_to_asking above 1"
+            )
+        if self.price_max_range_ratio < 1:
+            raise ValueError("ai.price_max_range_ratio must not be below 1")
 
 
 @dataclass(slots=True)
@@ -467,6 +513,10 @@ class DealScoringConfig:
         default_factory=lambda: {"high": 85, "medium": 65, "low": 35}
     )
     minimum_identity_confidence: float = 0.55
+    # Оценка цены, полученная от AI, не подтверждена аналогами с площадок.
+    # Такая сделка может дойти до INTERESTING, но не до HOT: HOT читается как
+    # «ехать покупать», и выдавать его на догадке модели нельзя.
+    allow_hot_on_ai_price: bool = False
     require_confirmed_model: bool = True
     price_outlier_discount_percent: float = 80.0
     profit_score_target_czk: float = 8000.0
@@ -780,6 +830,35 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
             prompt_name=str(ai_raw.get("prompt_name", "listing-analysis")),
             prompt_version=str(ai_raw.get("prompt_version", "v1.1.0")),
             prompts_path=str(ai_raw.get("prompts_path", "")),
+            price_estimate_enabled=_env_bool(
+                "AI_PRICE_ESTIMATE_ENABLED", bool(ai_raw.get("price_estimate_enabled", False))
+            ),
+            price_model=_env_str("OPENAI_PRICE_MODEL", str(ai_raw.get("price_model", "gpt-5.6-terra"))),
+            price_input_usd_per_1m=_env_float(
+                "OPENAI_PRICE_INPUT_USD_PER_1M", float(ai_raw.get("price_input_usd_per_1m", 2.00))
+            ),
+            price_cached_input_usd_per_1m=_env_float(
+                "OPENAI_PRICE_CACHED_INPUT_USD_PER_1M",
+                float(ai_raw.get("price_cached_input_usd_per_1m", 0.20)),
+            ),
+            price_output_usd_per_1m=_env_float(
+                "OPENAI_PRICE_OUTPUT_USD_PER_1M", float(ai_raw.get("price_output_usd_per_1m", 12.00))
+            ),
+            price_prompt_name=str(ai_raw.get("price_prompt_name", "price-estimate")),
+            price_prompt_version=str(ai_raw.get("price_prompt_version", "v1.0.0")),
+            price_cache_ttl_hours=_env_int(
+                "AI_PRICE_CACHE_TTL_HOURS", int(ai_raw.get("price_cache_ttl_hours", 720))
+            ),
+            price_min_comparables=int(ai_raw.get("price_min_comparables", 3)),
+            price_on_low_confidence=bool(ai_raw.get("price_on_low_confidence", True)),
+            price_allow_hot=_env_bool(
+                "AI_PRICE_ALLOW_HOT", bool(ai_raw.get("price_allow_hot", False))
+            ),
+            price_floor_czk=int(ai_raw.get("price_floor_czk", 500)),
+            price_ceiling_czk=int(ai_raw.get("price_ceiling_czk", 500_000)),
+            price_max_ratio_to_asking=float(ai_raw.get("price_max_ratio_to_asking", 8.0)),
+            price_min_ratio_to_asking=float(ai_raw.get("price_min_ratio_to_asking", 0.15)),
+            price_max_range_ratio=float(ai_raw.get("price_max_range_ratio", 2.5)),
         ),
         retail=RetailConfig(
             enabled=bool(retail_raw.get("enabled", True)),
@@ -974,6 +1053,9 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
             },
             minimum_identity_confidence=float(deal_raw.get("minimum_identity_confidence", 0.55)),
             require_confirmed_model=bool(deal_raw.get("require_confirmed_model", True)),
+            allow_hot_on_ai_price=_env_bool(
+                "AI_PRICE_ALLOW_HOT", bool(deal_raw.get("allow_hot_on_ai_price", False))
+            ),
             price_outlier_discount_percent=float(
                 deal_raw.get("price_outlier_discount_percent", 80)
             ),

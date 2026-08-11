@@ -22,6 +22,7 @@ from deal_radar.duplicates import (
 )
 from deal_radar.models import (
     AIAnalysis,
+    AIPriceEstimate,
     DealCosts,
     DealEvaluation,
     Listing,
@@ -268,6 +269,20 @@ class Storage:
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
                 PRIMARY KEY (content_hash, prompt_name, prompt_version, schema_version, model_name)
+            );
+            CREATE TABLE IF NOT EXISTS ai_price_cache (
+                estimate_key TEXT NOT NULL,
+                key_kind TEXT NOT NULL,
+                prompt_name TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                schema_version TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                listing_source TEXT NOT NULL,
+                listing_external_id TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                PRIMARY KEY (estimate_key, prompt_name, prompt_version, schema_version, model_name)
             );
             CREATE TABLE IF NOT EXISTS ai_call_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1423,6 +1438,74 @@ class Storage:
                     listing.source,
                     listing.external_id,
                     json.dumps(analysis.to_dict(), ensure_ascii=False),
+                    datetime.now(UTC).isoformat(),
+                    expires_at,
+                ),
+            )
+
+    def get_cached_ai_price(
+        self,
+        *,
+        estimate_key: str,
+        prompt_name: str,
+        prompt_version: str,
+        schema_version: str,
+        model_name: str,
+    ) -> AIPriceEstimate | None:
+        row = self.connection.execute(
+            """
+            SELECT data_json, expires_at FROM ai_price_cache
+            WHERE estimate_key = ? AND prompt_name = ? AND prompt_version = ?
+              AND schema_version = ? AND model_name = ?
+            """,
+            (estimate_key, prompt_name, prompt_version, schema_version, model_name),
+        ).fetchone()
+        if not row:
+            return None
+        if datetime.fromisoformat(row["expires_at"]) <= datetime.now(UTC):
+            with self.connection:
+                self.connection.execute(
+                    """
+                    DELETE FROM ai_price_cache
+                    WHERE estimate_key = ? AND prompt_name = ? AND prompt_version = ?
+                      AND schema_version = ? AND model_name = ?
+                    """,
+                    (estimate_key, prompt_name, prompt_version, schema_version, model_name),
+                )
+            return None
+        return AIPriceEstimate.from_dict(json.loads(row["data_json"]))
+
+    def cache_ai_price(
+        self, listing: Listing, estimate: AIPriceEstimate, key_kind: str, hours: int
+    ) -> None:
+        expires_at = (datetime.now(UTC) + timedelta(hours=max(1, hours))).isoformat()
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO ai_price_cache (
+                    estimate_key, key_kind, prompt_name, prompt_version, schema_version,
+                    model_name, listing_source, listing_external_id, data_json,
+                    created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(estimate_key, prompt_name, prompt_version, schema_version, model_name)
+                DO UPDATE SET
+                    key_kind = excluded.key_kind,
+                    listing_source = excluded.listing_source,
+                    listing_external_id = excluded.listing_external_id,
+                    data_json = excluded.data_json,
+                    created_at = excluded.created_at,
+                    expires_at = excluded.expires_at
+                """,
+                (
+                    estimate.identity_key,
+                    key_kind,
+                    estimate.prompt_name,
+                    estimate.prompt_version,
+                    estimate.schema_version,
+                    estimate.model_name,
+                    listing.source,
+                    listing.external_id,
+                    json.dumps(estimate.to_dict(), ensure_ascii=False),
                     datetime.now(UTC).isoformat(),
                     expires_at,
                 ),

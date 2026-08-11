@@ -9,6 +9,7 @@ from pathlib import Path
 from deal_radar.ai.client import AIUnavailable, OpenAIClient, estimate_cost_usd
 from deal_radar.ai.listing_analysis import ListingAnalyzer
 from deal_radar.ai.prefilter import ai_prefilter
+from deal_radar.ai.price_estimate import PriceEstimator
 from deal_radar.ai.prompt_loader import PromptNotFound, load_prompt
 from deal_radar.bike_identity import identify_listing
 from deal_radar.config import load_config, load_dotenv
@@ -63,6 +64,14 @@ def build_parser() -> argparse.ArgumentParser:
     ai_listing.add_argument("--title", default="")
     ai_listing.add_argument("--description", default="")
     ai_listing.add_argument("--price", type=int, default=None)
+    ai_price = subparsers.add_parser(
+        "ai-price-check",
+        help="Estimate the resale price of one listing with AI; no Telegram, no state changes",
+    )
+    ai_price.add_argument("--fixture", help="JSON file with title/description/price")
+    ai_price.add_argument("--title", default="")
+    ai_price.add_argument("--description", default="")
+    ai_price.add_argument("--price", type=int, default=None)
     return parser
 
 
@@ -76,6 +85,10 @@ def _ai_check(config, live: bool) -> int:
     print(f"Primary model configured: {ai.model_primary}")
     print(f"Fallback model configured: {ai.model_fallback if ai.fallback_enabled else 'disabled'}")
     print(f"Daily budget: ${ai.daily_budget_usd:.2f} (stop at budget: {ai.stop_at_budget})")
+    if ai.price_estimate_enabled:
+        print(f"Price estimates: enabled ({ai.price_model}, HOT allowed: {ai.price_allow_hot})")
+    else:
+        print("Price estimates: disabled (AI_PRICE_ESTIMATE_ENABLED)")
     try:
         bundle = load_prompt(ai.prompt_name, ai.prompt_version, ai.prompts_path)
     except PromptNotFound as exc:
@@ -119,22 +132,9 @@ def _ai_check(config, live: bool) -> int:
 def _ai_test_listing(config, args) -> int:
     """Безопасный прогон одного объявления: без Telegram и без записи в БД."""
 
-    data = {"title": args.title, "description": args.description, "price_czk": args.price}
-    if args.fixture:
-        data.update(json.loads(Path(args.fixture).read_text(encoding="utf-8")))
-    if not data.get("title"):
-        print("Provide --fixture or --title")
+    listing = _manual_listing(args, "ai-test-listing")
+    if listing is None:
         return 1
-    listing = Listing(
-        source="manual",
-        external_id="ai-test-listing",
-        title=str(data["title"]),
-        description=str(data.get("description", "")),
-        url="https://example.invalid/manual-ai-test",
-        profile="manual",
-        price_czk=data.get("price_czk"),
-        location=data.get("location"),
-    )
     identity = identify_listing(listing)
     prefilter = ai_prefilter(listing, config.ai, identity=identity)
     print(json.dumps({"prefilter": prefilter.to_dict()}, ensure_ascii=False, indent=2))
@@ -162,6 +162,65 @@ def _ai_test_listing(config, args) -> int:
     )
     print("No Telegram message was sent and no production data was changed.")
     return 0 if outcome.analysis.status == "AI_OK" else 1
+
+
+def _manual_listing(args, external_id: str) -> Listing | None:
+    data = {"title": args.title, "description": args.description, "price_czk": args.price}
+    if args.fixture:
+        data.update(json.loads(Path(args.fixture).read_text(encoding="utf-8")))
+    if not data.get("title"):
+        print("Provide --fixture or --title")
+        return None
+    return Listing(
+        source="manual",
+        external_id=external_id,
+        title=str(data["title"]),
+        description=str(data.get("description", "")),
+        url=f"https://example.invalid/{external_id}",
+        profile="manual",
+        price_czk=data.get("price_czk"),
+        location=data.get("location"),
+    )
+
+
+def _ai_price_check(config, args) -> int:
+    """Прогон оценки цены на одном объявлении: один вызов, без записи в прод."""
+
+    listing = _manual_listing(args, "ai-price-check")
+    if listing is None:
+        return 1
+    identity = identify_listing(listing)
+    try:
+        analyzer = ListingAnalyzer(config.ai)
+        estimator = PriceEstimator(config.ai)
+    except PromptNotFound as exc:
+        print(f"Prompt could not be loaded: {exc}")
+        return 1
+    # Level 1 сначала: оценка цены сильно зависит от состояния и характеристик.
+    analysis = analyzer.analyze(listing, identity).analysis
+    print(f"Level 1: {analysis.status}")
+    outcome = estimator.estimate(listing, identity, analysis)
+    estimate = outcome.estimate
+    print(json.dumps(estimate.to_dict(), ensure_ascii=False, indent=2))
+    if estimate.status == "PRICE_OK":
+        quick = int(round((estimate.market_price_czk or 0) * (1 - config.market_pricing.quick_sale_discount)))
+        print(
+            f"\nasking: {listing.price_czk} CZK | AI: {estimate.market_price_czk} CZK "
+            f"({estimate.price_low_czk}–{estimate.price_high_czk}) | quick sale: {quick} CZK "
+            f"| confidence: {estimate.confidence} | basis: {estimate.basis}"
+        )
+    elif estimate.status == "PRICE_REJECTED":
+        print(f"\nEstimate rejected by the sanity check: {estimate.reject_reason}")
+    log = outcome.call_log or {}
+    print(
+        "cost: ${:.6f} | model: {} | {} ms".format(
+            float(log.get("estimated_total_cost_usd", 0.0)),
+            log.get("model_name", ""),
+            log.get("latency_ms", 0),
+        )
+    )
+    print("No Telegram message was sent and no production data was changed.")
+    return 0 if estimate.status == "PRICE_OK" else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -199,6 +258,8 @@ def main(argv: list[str] | None = None) -> int:
         return _ai_check(config, args.live)
     if args.command == "ai-test-listing":
         return _ai_test_listing(config, args)
+    if args.command == "ai-price-check":
+        return _ai_price_check(config, args)
 
     service = DealRadarService(config)
     try:

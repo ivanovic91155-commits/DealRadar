@@ -161,13 +161,20 @@ class OpenAIClient:
         schema_name: str,
         schema: dict[str, Any],
         max_output_tokens: int = 2000,
+        model_override: str = "",
     ) -> AIResult:
-        """Один structured-output запрос с ретраями и переходом на fallback-модель."""
+        """Один structured-output запрос с ретраями и переходом на fallback-модель.
+
+        ``model_override`` подменяет основную модель для задач, которым нужна
+        другая: извлечение фактов и оценка цены стоят разных денег и требуют
+        разного качества рассуждения.
+        """
 
         if not self.config.api_key:
             raise AIAuthError("OPENAI_API_KEY is not configured")
-        models: list[tuple[str, bool]] = [(self.config.model_primary, False)]
-        if self.config.fallback_enabled and self.config.model_fallback != self.config.model_primary:
+        primary = model_override or self.config.model_primary
+        models: list[tuple[str, bool]] = [(primary, False)]
+        if self.config.fallback_enabled and self.config.model_fallback != primary:
             models.append((self.config.model_fallback, True))
 
         last_error: AIUnavailable | None = None
@@ -192,8 +199,15 @@ class OpenAIClient:
                 last_error = exc
                 if used_fallback:
                     break
+                # Запасной модели может и не быть — например когда вызов уже шёл
+                # на ней самой через model_override. Обещать переход в логе,
+                # которого не будет, нельзя.
+                has_fallback = len(models) > 1
                 LOGGER.warning(
-                    "AI model %s failed (%s); trying fallback model", model_name, type(exc).__name__
+                    "AI model %s failed (%s); %s",
+                    model_name,
+                    type(exc).__name__,
+                    "trying fallback model" if has_fallback else "no fallback model configured",
                 )
         raise last_error or AIUnavailable("AI request failed")
 

@@ -5,11 +5,18 @@ import random
 import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from deal_radar.ai.budget import BudgetGuard
 from deal_radar.ai.listing_analysis import ListingAnalyzer, content_fingerprint
 from deal_radar.ai.prefilter import REASON_BUDGET, ai_prefilter
+from deal_radar.ai.price_estimate import (
+    PriceEstimator,
+    estimate_key,
+    needs_estimate,
+    to_market_valuation,
+)
 from deal_radar.config import AppConfig
 from deal_radar.bike_identity import configure_identity, identify_listing
 from deal_radar.deal_scoring import DealEvaluator, select_deal_notifications
@@ -23,7 +30,7 @@ from deal_radar.market_sources import (
     MarktplaatsMarketSource,
     UsedMarketSource,
 )
-from deal_radar.models import Listing, ListingAnalysis, MarketValuation
+from deal_radar.models import AIPriceEstimate, Listing, ListingAnalysis, MarketValuation
 from deal_radar.price_sources import PriceSource, ZboziPriceSource
 from deal_radar.pricing import NewBikePriceService
 from deal_radar.pricing import valuation_cache_key
@@ -69,6 +76,8 @@ class DealRadarService:
         self._source_backoff: dict[str, tuple[float, float]] = {}
         self._ai_analyzer_cache: ListingAnalyzer | None = None
         self._ai_setup_logged = False
+        self._price_estimator_cache: PriceEstimator | None = None
+        self._price_setup_logged = False
 
     def close(self) -> None:
         self.storage.close()
@@ -356,6 +365,180 @@ class DealRadarService:
             else:
                 stats["ai_failed"] += 1
 
+    def _price_estimator(self) -> PriceEstimator | None:
+        config = self.config.ai
+        if not (config.enabled and config.price_estimate_enabled):
+            return None
+        if not config.api_key:
+            return None  # об отсутствии ключа уже сообщила фаза Level 1
+        if self._price_estimator_cache is None:
+            try:
+                self._price_estimator_cache = PriceEstimator(config)
+            except Exception:
+                if not self._price_setup_logged:
+                    LOGGER.exception("AI price estimator could not be built; the phase stays disabled")
+                    self._price_setup_logged = True
+                return None
+        return self._price_estimator_cache
+
+    def _run_ai_price_estimates(
+        self, analyzed: dict[str, tuple[Listing, ListingAnalysis]]
+    ) -> dict[str, int]:
+        """Фаза AI Level 2: оценка цены там, где аналогов не нашлось.
+
+        Ступени выше — реальные аналоги и амортизация от цены нового — упираются
+        в бюджет скрейпинга, поэтому большая часть объявлений приходила сюда
+        вообще без цены. Эта фаза HTTP-запросов к площадкам не делает.
+
+        Измеренная цена всегда сильнее оценённой: если движок что-то нашёл,
+        его результат остаётся в ``market_valuation``, а ответ модели ложится
+        рядом как второе мнение.
+        """
+
+        estimator = self._price_estimator()
+        if estimator is None:
+            return {}
+        stats = {
+            "ai_price_calls": 0,
+            "ai_price_cache_hits": 0,
+            "ai_price_applied": 0,
+            "ai_price_rejected": 0,
+            "ai_price_failed": 0,
+            "ai_price_pending": 0,
+            "ai_price_cost_usd": 0.0,
+        }
+        config = self.config.ai
+        guard = BudgetGuard(config, self.storage)
+        pending: list[tuple[Listing, ListingAnalysis]] = []
+        for listing, analysis in analyzed.values():
+            if not needs_estimate(analysis.market_valuation, config):
+                continue
+            key, _kind = estimate_key(listing, analysis.identity, analysis.ai_analysis)
+            cached = self.storage.get_cached_ai_price(
+                estimate_key=key,
+                prompt_name=estimator.prompt.name,
+                prompt_version=estimator.prompt.version,
+                schema_version=estimator.prompt.schema_version,
+                model_name=config.price_model,
+            )
+            if cached is not None:
+                cached.cache_used = True
+                self._apply_price(listing, analysis, cached, stats)
+                stats["ai_price_cache_hits"] += 1
+                continue
+            pending.append((listing, analysis))
+
+        # Дедупликация внутри цикла. Кэш в базе спасает только между циклами, а
+        # три объявления об одном и том же велосипеде приходят обычно вместе:
+        # без этой группировки они ушли бы тремя платными вызовами сразу.
+        groups: dict[str, list[tuple[Listing, ListingAnalysis]]] = {}
+        for listing, analysis in pending:
+            key, _kind = estimate_key(listing, analysis.identity, analysis.ai_analysis)
+            groups.setdefault(key, []).append((listing, analysis))
+        batches = list(groups.values())
+
+        deadline = time.monotonic() + max(30.0, self.config.poll_interval_seconds / 2)
+        chunk_size = max(1, config.max_parallel_requests) * 3
+        for start in range(0, len(batches), chunk_size):
+            budget = guard.state()
+            if budget.stopped or time.monotonic() >= deadline:
+                reason = REASON_BUDGET if budget.stopped else "CYCLE_DEADLINE"
+                for batch in batches[start:]:
+                    for listing, analysis in batch:
+                        analysis.ai_price = estimator.pending(
+                            listing, analysis.identity, analysis.ai_analysis, reason
+                        )
+                        stats["ai_price_pending"] += 1
+                break
+            self._estimate_chunk(estimator, batches[start : start + chunk_size], stats)
+
+        for listing, analysis in analyzed.values():
+            if analysis.ai_price is not None:
+                self.storage.save_analysis(listing, analysis)
+        return stats
+
+    def _estimate_chunk(
+        self,
+        estimator: PriceEstimator,
+        batches: list[list[tuple[Listing, ListingAnalysis]]],
+        stats: dict[str, int],
+    ) -> None:
+        """Одна пачка. Каждый элемент — группа объявлений об одном велосипеде:
+        вызов делается по первому из них, результат получает вся группа."""
+
+        workers = min(self.config.ai.max_parallel_requests, len(batches))
+        outcomes = []
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            futures = {}
+            for batch in batches:
+                listing, analysis = batch[0]
+                futures[
+                    pool.submit(
+                        estimator.estimate,
+                        listing,
+                        analysis.identity,
+                        analysis.ai_analysis,
+                        analysis.market_valuation,
+                        analysis.valuation,
+                    )
+                ] = batch
+            for future, batch in futures.items():
+                try:
+                    outcomes.append((batch, future.result()))
+                except Exception:
+                    LOGGER.exception(
+                        "AI price estimate crashed for %s; cycle continues", batch[0][0].key
+                    )
+                    stats["ai_price_failed"] += len(batch)
+
+        for batch, outcome in outcomes:
+            listing, analysis = batch[0]
+            if outcome.call_log:
+                self.storage.log_ai_call(outcome.call_log)
+                stats["ai_price_calls"] += 1
+                stats["ai_price_cost_usd"] = round(
+                    stats["ai_price_cost_usd"]
+                    + float(outcome.call_log.get("estimated_total_cost_usd", 0.0)),
+                    6,
+                )
+            if outcome.estimate.status == "PRICE_OK":
+                _key, kind = estimate_key(listing, analysis.identity, analysis.ai_analysis)
+                self.storage.cache_ai_price(
+                    listing, outcome.estimate, kind, self.config.ai.price_cache_ttl_hours
+                )
+            for index, (item, item_analysis) in enumerate(batch):
+                estimate = outcome.estimate if index == 0 else replace(outcome.estimate, cache_used=True)
+                self._apply_price(item, item_analysis, estimate, stats)
+                if index:
+                    stats["ai_price_cache_hits"] += 1
+
+    def _apply_price(
+        self,
+        listing: Listing,
+        analysis: ListingAnalysis,
+        estimate: AIPriceEstimate,
+        stats: dict[str, int],
+    ) -> None:
+        analysis.ai_price = estimate
+        if estimate.status == "PRICE_REJECTED":
+            stats["ai_price_rejected"] += 1
+            return
+        if estimate.status != "PRICE_OK":
+            stats["ai_price_failed"] += 1
+            return
+        # Реальные аналоги не подменяются: оценка заполняет пустоту, а не спорит
+        # с измерением.
+        if analysis.market_valuation is not None and analysis.market_valuation.market_price_czk is not None:
+            return
+        valuation = to_market_valuation(
+            estimate, listing, self.config.market_pricing.quick_sale_discount
+        )
+        if valuation is None:
+            return
+        analysis.market_valuation = valuation
+        analysis.used_comparables = valuation.as_used_comparables()
+        stats["ai_price_applied"] += 1
+
     def _market_finder(self) -> MarketPriceEngine | None:
         config = self.config.market_pricing
         if not config.enabled:
@@ -630,6 +813,11 @@ class DealRadarService:
             )
             analysis.market_valuation = market_valuation
             analysis.duplicate_alternatives = previous.duplicate_alternatives
+            # build_analysis создаёт объект заново, поэтому результаты AI-фазы
+            # нужно перенести явно — иначе они теряются у тех объявлений,
+            # которым достался слот глубокого анализа.
+            analysis.ai_analysis = previous.ai_analysis
+            analysis.ai_price = previous.ai_price
             if consecutive_errors and market_valuation is None:
                 analysis.preliminary_priority_score = max(
                     analysis.preliminary_priority_score,
@@ -638,6 +826,9 @@ class DealRadarService:
                 analysis.priority_class = "manual_review"
             analyzed[listing.key] = (listing, analysis)
             self.storage.save_analysis(listing, analysis)
+
+        # Фаза AI Level 2: цена там, где детерминированный каскад её не дал.
+        price_stats = self._run_ai_price_estimates(analyzed)
 
         if self.config.deal_scoring.enabled:
             evaluator = DealEvaluator(self.config.deal_scoring)
@@ -782,6 +973,7 @@ class DealRadarService:
         for source, count in market_http_requests.items():
             stats[f"market_http_{source}"] = count
         stats.update(ai_stats)
+        stats.update(price_stats)
         LOGGER.info("Stage 2.2 cycle funnel: %s", stats)
         return stats
 

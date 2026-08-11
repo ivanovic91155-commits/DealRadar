@@ -203,7 +203,15 @@ def _price_estimate_block(analysis) -> list[str]:
     valuation = analysis.valuation
 
     # 1. Рыночная оценка (лучший доступный источник)
-    if market and market.market_price_czk is not None:
+    if market and market.market_price_czk is not None and market.status == "ai_estimate":
+        # Отдельная формулировка: это оценка модели, а не данные площадок, и
+        # выглядеть она должна иначе, чем измеренная цена.
+        lines.append(f"🤖 Оценка AI: <b>~{format_czk(market.market_price_czk)}</b>")
+        if market.price_low_czk and market.price_high_czk:
+            low = f"{market.price_low_czk:,}".replace(",", " ")
+            lines[-1] += f" ({low} – {format_czk(market.price_high_czk)})"
+        lines.append("⚠️ Аналогов на площадках не найдено — цифра ориентировочная")
+    elif market and market.market_price_czk is not None:
         note = ""
         if market.status == "depreciation_estimate":
             note = " (от цены нового, б/у-аналогов нет)"
@@ -219,10 +227,26 @@ def _price_estimate_block(analysis) -> list[str]:
     else:
         lines.append("📊 Рыночная оценка недоступна — проверьте вручную")
 
-    # 2. Навар (только если посчитан)
+    # 2. Второе мнение AI, когда аналоги нашлись, но их было слишком мало.
+    ai_price = getattr(analysis, "ai_price", None)
+    if (
+        ai_price is not None
+        and ai_price.status == "PRICE_OK"
+        and ai_price.market_price_czk is not None
+        and market is not None
+        and market.status != "ai_estimate"
+    ):
+        lines.append(f"🤖 Второе мнение AI: ~{format_czk(ai_price.market_price_czk)}")
+
+    # 3. Навар (только если посчитан)
     if deal and deal.net_profit_czk is not None:
         sign = "+" if deal.net_profit_czk >= 0 else "−"
-        approx = " (приблизительно)" if (market and market.status == "depreciation_estimate") else " после расходов"
+        if market and market.status == "depreciation_estimate":
+            approx = " (приблизительно)"
+        elif market and market.status == "ai_estimate":
+            approx = " (по оценке AI)"
+        else:
+            approx = " после расходов"
         lines.append(f"📈 Навар: <b>~{sign}{format_czk(abs(round(deal.net_profit_czk)))}</b>{approx}")
     return lines
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 from typing import Any
 
 from deal_radar.ai.client import AIInvalidResponse
@@ -106,12 +107,37 @@ class StrictSchemaShapeTest(unittest.TestCase):
         for value in node.values():
             self.walk(value)
 
+    def shipped_schemas(self) -> list[tuple[str, Any]]:
+        """Каждая версия каждого промпта, поставляемая с пакетом."""
+
+        root = Path(__file__).resolve().parents[1] / "deal_radar" / "ai" / "prompts"
+        found = [
+            (str(path.relative_to(root)), json.loads(path.read_text(encoding="utf-8")))
+            for path in sorted(root.glob("*/*/schema.json"))
+        ]
+        self.assertTrue(found, "no shipped prompt schemas were found")
+        return found
+
     def test_every_object_declares_all_properties_as_required(self) -> None:
-        self.walk(SCHEMA)
+        for label, schema in self.shipped_schemas():
+            with self.subTest(schema=label):
+                self.walk(schema)
 
     def test_schema_uses_no_unsupported_keywords(self) -> None:
         forbidden = {"allOf", "not", "if", "then", "else", "dependentRequired", "dependentSchemas"}
-        self.assertFalse(forbidden & set(json.dumps(SCHEMA).split('"')))
+        for label, schema in self.shipped_schemas():
+            with self.subTest(schema=label):
+                self.assertFalse(forbidden & set(json.dumps(schema).split('"')))
+
+    def test_every_shipped_prompt_version_loads(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "deal_radar" / "ai" / "prompts"
+        for meta in sorted(root.glob("*/*/meta.json")):
+            name, version = meta.parent.parent.name, meta.parent.name
+            with self.subTest(prompt=f"{name}/{version}"):
+                bundle = load_prompt(name, version, "")
+                self.assertTrue(bundle.system.strip())
+                self.assertTrue(bundle.task.strip().endswith("DATA:"))
+                self.assertTrue(bundle.schema_version)
 
     def test_optional_values_are_expressed_as_null_unions(self) -> None:
         model = SCHEMA["properties"]["identity"]["properties"]["model"]

@@ -533,6 +533,50 @@ class AIAnalysis:
 
 
 @dataclass(slots=True)
+class AIPriceEstimate:
+    """AI-оценка цены перепродажи (Level 2).
+
+    Последняя ступень каскада: включается, когда реальных аналогов с площадок
+    не нашлось или их слишком мало. У модели нет живых данных рынка, поэтому
+    хранится не одно число, а диапазон вместе с уверенностью и обоснованием —
+    и отдельно причина, по которой оценку могли отбраковать.
+    """
+
+    status: str = "PRICE_PENDING"  # PRICE_OK | PRICE_PENDING | PRICE_FAILED | PRICE_REJECTED
+    market_price_czk: int | None = None
+    price_low_czk: int | None = None
+    price_high_czk: int | None = None
+    confidence: str = "low"  # high | medium | low
+    basis: str = ""  # SAME_MODEL | SIMILAR_MODEL | COMPONENT_CLASS | GENERIC
+    reasoning_summary: str = ""
+    condition_bucket: str = ""
+    identity_key: str = ""
+    schema_version: str = ""
+    prompt_name: str = ""
+    prompt_version: str = ""
+    model_name: str = ""
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    warnings: list[str] = field(default_factory=list)
+    reject_reason: str = ""
+    cache_used: bool = False
+    used_fallback: bool = False
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    output_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    latency_ms: int = 0
+    error_type: str = ""
+    error_message_safe: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AIPriceEstimate":
+        return _filtered(cls, dict(data))
+
+
+@dataclass(slots=True)
 class ListingAnalysis:
     preliminary_priority_score: int
     priority_class: str
@@ -550,6 +594,7 @@ class ListingAnalysis:
     market_valuation: MarketValuation | None = None
     deal_evaluation: DealEvaluation | None = None
     ai_analysis: AIAnalysis | None = None
+    ai_price: AIPriceEstimate | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -569,5 +614,7 @@ class ListingAnalysis:
             copy["deal_evaluation"] = DealEvaluation.from_dict(copy["deal_evaluation"])
         if isinstance(copy.get("ai_analysis"), dict):
             copy["ai_analysis"] = AIAnalysis.from_dict(copy["ai_analysis"])
+        if isinstance(copy.get("ai_price"), dict):
+            copy["ai_price"] = AIPriceEstimate.from_dict(copy["ai_price"])
         allowed = {item.name for item in fields(cls)}
         return cls(**{key: value for key, value in copy.items() if key in allowed})

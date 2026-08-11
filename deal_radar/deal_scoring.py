@@ -468,6 +468,18 @@ class DealEvaluator:
                 status = "LOW_PRIORITY"
                 reasons.append("Прибыль положительная, но финансовые показатели ниже порогов интересной сделки.")
 
+        # Цена от AI не подтверждена аналогами с площадок, поэтому HOT на ней не
+        # выдаётся: пороги остаются прежними, понижается только итоговый статус.
+        if (
+            status == "HOT"
+            and valuation is not None
+            and valuation.status == "ai_estimate"
+            and not self.config.allow_hot_on_ai_price
+        ):
+            status = "INTERESTING"
+            reasons.append("HOT не присваивается: цена оценена AI, а не подтверждена аналогами.")
+            flags.append("hot_blocked_by_ai_price")
+
         deal_score, components = _score_components(
             net_profit=net_profit,
             roi_percent=roi_percent,
