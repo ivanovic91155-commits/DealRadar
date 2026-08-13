@@ -161,12 +161,21 @@ ACCESSORY_WORDS = {
     "baterie", "battery", "charger", "fork", "frame only", "helmet", "nabijecka", "plášť", "plast",
     "pneumatika", "ram kola", "sedlo", "vidlice", "bearing", "bearings", "headset", "lozisko",
     "lozisek", "sada kol", "vypletena kola", "wheelset",
+    # Велосипедное «kolo» в заголовке протаскивает и вещи, которые велосипедом не
+    # являются: детское кресло (sedačka), велотуфли (tretry), спиннинг-тренажёр и
+    # прочие домашние станки. Слово в заголовке здесь — сам предмет, а не аксессуар
+    # к продаваемому велосипеду, поэтому отсекаем до платного вызова AI.
+    "sedacka", "tretry", "spinning", "trenazer", "rotoped",
 }
 # Продажа рамы отдельно: "prodám rám Trek", "rámec bez vidlice". Одиночное слово
 # "ram" в ACCESSORY_WORDS занести нельзя — оно встречается в размере рамы.
+# "X na kolo" — почти всегда аксессуар *для* велосипеда (sedačka na kolo,
+# tretry na kolo, držák na kolo): сам велосипед в заголовке зовётся "kolo",
+# а не "na kolo".
 ACCESSORY_PHRASES_RE = re.compile(
     r"\b(?:prodam|prodej|pouze|jen|samotny|nabizim)\s+ram(?:ec|u)?\b"
     r"|\bram(?:ec|u)?\s+(?:bez|z)\b"
+    r"|\bna\s+kola?\b"
 )
 USED_WORDS = {"bazar", "pouzite", "pouzity", "refurbished", "repasovane", "repasovany", "used"}
 UNAVAILABLE_WORDS = {"neni skladem", "out of stock", "unavailable", "vyprodano"}

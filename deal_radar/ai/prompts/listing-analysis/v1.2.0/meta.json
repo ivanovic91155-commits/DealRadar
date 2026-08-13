@@ -1,0 +1,5 @@
+{
+  "schema_version": "dealradar.ai-analysis.v1",
+  "schema_name": "listing_analysis",
+  "max_output_tokens": 2000
+}

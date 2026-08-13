@@ -36,6 +36,34 @@ class RejectionTest(unittest.TestCase):
         self.assertEqual(result.reason_code, REASON_PARTS)
         self.assertEqual(result.matched_rule, "hard_filter_accessory_or_part")
 
+    def test_bike_shaped_non_bikes_are_rejected_before_spending_a_call(self) -> None:
+        # Слово "kolo" в заголовке протаскивает вещи, велосипедом не являющиеся:
+        # это ровно те карточки, на которые жаловался владелец.
+        for title in (
+            "Dětská sedačka na kolo",
+            "Spinningove kolo SCHWINN",
+            "Tretry na kolo FORCE, vel. 45",
+            "Cyklotrenažér Elite Suito",
+            "Rotoped domácí skládací",
+        ):
+            with self.subTest(title=title):
+                result = ai_prefilter(listing(title), CONFIG)
+                self.assertFalse(result.passed, title)
+                self.assertEqual(result.reason_code, REASON_PARTS)
+
+    def test_real_bicycles_are_not_caught_by_the_accessory_backstop(self) -> None:
+        # "na kolo" ловит аксессуары, но настоящий велосипед в заголовке зовётся
+        # "kolo"/"kola", а не "na kolo"; размер колёс "na 29 kolech" — не аксессуар.
+        for title in (
+            "Trek Marlin 7 2024 horské kolo",
+            "Prodám kolo",
+            "Kross Level s nosičem na 29 kolech",
+            "Scott Aspect, jezdí na 27.5 kolech",
+        ):
+            with self.subTest(title=title):
+                result = ai_prefilter(listing(title), CONFIG)
+                self.assertTrue(result.passed, title)
+
     def test_kids_bike_is_rejected(self) -> None:
         result = ai_prefilter(listing("Woom 4"), CONFIG)
         self.assertFalse(result.passed)

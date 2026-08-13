@@ -23,6 +23,7 @@ from deal_radar.config import (
     SearchProfile,
     TelegramConfig,
 )
+from deal_radar.http import HttpError
 from deal_radar.models import Listing
 from deal_radar.service import DealRadarService
 
@@ -72,6 +73,54 @@ MODEL_ANSWER: dict[str, Any] = {
     "evidence": [
         {"field": "brand", "value": "Trek", "source": "TITLE", "excerpt": "Trek Marlin 7"}
     ],
+    "warnings": [],
+}
+
+
+NOT_A_BIKE: dict[str, Any] = {
+    "classification": {
+        "is_bicycle": False,
+        "listing_type": "ACCESSORY",
+        "relevance_confidence": 0.95,
+    },
+    "identity": {
+        "brand": None,
+        "model": None,
+        "generation": None,
+        "model_year": None,
+        "bike_type": None,
+        "is_electric": None,
+        "identity_confidence": 0.0,
+        "manual_identification_needed": True,
+    },
+    "specifications": {
+        "frame_size_raw": None,
+        "frame_size_normalized": None,
+        "wheel_size_inches": None,
+        "frame_material": None,
+        "fork": None,
+        "groupset": None,
+        "brakes": None,
+    },
+    "condition": {
+        "claimed_condition": "UNKNOWN",
+        "service_needed": None,
+        "defects": [],
+        "missing_parts": [],
+        "condition_confidence": 0.0,
+    },
+    "opportunity": {
+        "seller_urgency": "UNKNOWN",
+        "listing_quality": "LOW",
+        "hidden_opportunity": False,
+    },
+    "risk": {
+        "risk_flags": [],
+        "suspicious_price": False,
+        "possible_stolen_bike": False,
+        "possible_scam": False,
+    },
+    "evidence": [],
     "warnings": [],
 }
 
@@ -198,6 +247,44 @@ class PayloadTest(unittest.TestCase):
         self.assertNotIn("me@example.cz", body)
 
 
+def listing_with_photo(url: str = "https://img.test/bike.jpg", **kwargs: Any) -> Listing:
+    base = listing(**kwargs)
+    base.image_url = url
+    return base
+
+
+class VisionTest(unittest.TestCase):
+    def test_first_photo_is_attached_when_vision_is_on(self) -> None:
+        poster = RecordingPoster()
+        analyzer(poster).analyze(listing_with_photo())
+        content = poster.calls[0]["input"][1]["content"]
+        self.assertIsInstance(content, list)
+        image_parts = [part for part in content if part.get("type") == "input_image"]
+        self.assertEqual(image_parts[0]["image_url"], "https://img.test/bike.jpg")
+
+    def test_no_photo_is_sent_when_vision_is_off(self) -> None:
+        poster = RecordingPoster()
+        analyzer(poster, vision_enabled=False).analyze(listing_with_photo())
+        self.assertIsInstance(poster.calls[0]["input"][1]["content"], str)
+
+    def test_a_listing_without_a_photo_stays_text_only(self) -> None:
+        poster = RecordingPoster()
+        analyzer(poster).analyze(listing())
+        self.assertIsInstance(poster.calls[0]["input"][1]["content"], str)
+
+    def test_vision_failure_retries_without_the_image_and_flags_it(self) -> None:
+        # Модель могла отвергнуть картинку (например, она не мультимодальна).
+        # Зрение не должно ухудшать текстовый разбор: повтор без фото проходит.
+        poster = RecordingPoster(HttpError("bad image", status_code=400), api_response())
+        outcome = analyzer(poster).analyze(listing_with_photo())
+        self.assertEqual(outcome.analysis.status, "AI_OK")
+        self.assertIn("ai_vision_unavailable_text_only", outcome.analysis.warnings)
+        self.assertEqual(len(poster.calls), 2)
+        # Первый вызов нёс картинку, второй — только текст.
+        self.assertIsInstance(poster.calls[0]["input"][1]["content"], list)
+        self.assertIsInstance(poster.calls[1]["input"][1]["content"], str)
+
+
 class AnalyzeTest(unittest.TestCase):
     def test_successful_analysis_fills_every_block(self) -> None:
         outcome = analyzer(RecordingPoster()).analyze(listing())
@@ -208,7 +295,7 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual(result.identity.model, "Marlin 7")
         self.assertEqual(result.condition.claimed_condition, "GOOD")
         self.assertEqual(result.schema_version, "dealradar.ai-analysis.v1")
-        self.assertEqual(result.prompt_version, "v1.1.0")
+        self.assertEqual(result.prompt_version, "v1.2.0")
         self.assertGreater(result.estimated_cost_usd, 0)
 
     def test_call_log_carries_the_documented_fields(self) -> None:
@@ -390,6 +477,54 @@ class ShadowModeCycleTest(unittest.TestCase):
         self.assertEqual(stored.ai_analysis.status, "AI_OK")
         assert stored.ai_analysis.identity is not None
         self.assertEqual(stored.ai_analysis.identity.model, "Marlin 7")
+
+    def test_confident_non_bike_is_suppressed_when_ai_is_live(self) -> None:
+        # Обычный заголовок проходит дешёвый фильтр, но AI по фото/тексту решает,
+        # что это не велосипед — карточка не уходит, причина остаётся в базе.
+        items = [listing(external_id="kus", title="Nabizim pekny kus levne")]
+        service, telegram = self.build(
+            AIConfig(
+                enabled=True,
+                api_key="sk-test",
+                shadow_mode=False,
+                can_affect_deal_status=True,
+            ),
+            items,
+        )
+        poster = RecordingPoster(api_response(NOT_A_BIKE))
+        service._ai_analyzer = lambda: analyzer(poster)  # type: ignore[method-assign]
+        try:
+            service.process_once(telegram)
+            stored = service.storage.get_analysis("bazos", "kus")
+        finally:
+            service.close()
+        self.assertNotIn("kus", telegram.sent)
+        assert stored is not None
+        self.assertEqual(stored.notification_status, "excluded")
+        self.assertEqual(stored.notification_reason, "ai_not_a_bicycle")
+
+    def test_non_bike_is_untouched_while_ai_cannot_affect_status(self) -> None:
+        # Тот же ответ модели, но предохранитель can_affect_deal_status выключен:
+        # классификации не разрешено убирать карточку.
+        items = [listing(external_id="kus", title="Nabizim pekny kus levne")]
+        service, telegram = self.build(
+            AIConfig(
+                enabled=True,
+                api_key="sk-test",
+                shadow_mode=False,
+                can_affect_deal_status=False,
+            ),
+            items,
+        )
+        poster = RecordingPoster(api_response(NOT_A_BIKE))
+        service._ai_analyzer = lambda: analyzer(poster)  # type: ignore[method-assign]
+        try:
+            service.process_once(telegram)
+            stored = service.storage.get_analysis("bazos", "kus")
+        finally:
+            service.close()
+        assert stored is not None
+        self.assertNotEqual(stored.notification_reason, "ai_not_a_bicycle")
 
     def test_second_cycle_reuses_the_cache_instead_of_paying_again(self) -> None:
         items = [listing("cached")]

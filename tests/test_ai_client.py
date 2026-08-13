@@ -79,6 +79,43 @@ class RequestShapeTest(unittest.TestCase):
         self.assertEqual(poster.calls[0]["url"], "https://api.openai.com/v1/responses")
         self.assertEqual(poster.calls[0]["timeout"], 30)
 
+    def test_user_content_stays_a_plain_string_without_images(self) -> None:
+        # Без картинок тело запроса обязано остаться таким же, как до зрения.
+        poster = FakePoster(ok_response())
+        instance, _ = client(poster)
+        call(instance)
+        self.assertEqual(poster.calls[0]["payload"]["input"][1]["content"], "user")
+
+    def test_images_become_input_image_parts(self) -> None:
+        poster = FakePoster(ok_response())
+        instance, _ = client(poster)
+        instance.structured(
+            system="system",
+            user="user",
+            schema_name="listing_analysis",
+            schema={"type": "object"},
+            image_urls=["https://img.test/bike.jpg"],
+            image_detail="low",
+        )
+        content = poster.calls[0]["payload"]["input"][1]["content"]
+        self.assertEqual(content[0], {"type": "input_text", "text": "user"})
+        self.assertEqual(
+            content[1],
+            {"type": "input_image", "image_url": "https://img.test/bike.jpg", "detail": "low"},
+        )
+
+    def test_empty_image_urls_do_not_switch_to_the_array_form(self) -> None:
+        poster = FakePoster(ok_response())
+        instance, _ = client(poster)
+        instance.structured(
+            system="system",
+            user="user",
+            schema_name="listing_analysis",
+            schema={"type": "object"},
+            image_urls=[None, ""],
+        )
+        self.assertEqual(poster.calls[0]["payload"]["input"][1]["content"], "user")
+
     def test_successful_call_reports_payload_and_tokens(self) -> None:
         poster = FakePoster(
             ok_response('{"brand": "Trek"}', input_tokens=1500, cached_tokens=900, output_tokens=250)

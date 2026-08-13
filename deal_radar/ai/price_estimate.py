@@ -231,6 +231,31 @@ class PriceEstimator:
 
     # -- собственно оценка ---------------------------------------------------
 
+    def _structured(self, user_message: str, image_urls: list[str] | None) -> AIResult:
+        return self.client.structured(
+            system=self.prompt.system,
+            user=user_message,
+            schema_name=self.prompt.schema_name,
+            schema=self.prompt.schema,
+            max_output_tokens=self.prompt.max_output_tokens,
+            model_override=self.config.price_model,
+            image_urls=image_urls,
+            image_detail=self.config.vision_detail,
+        )
+
+    def _failure(
+        self, estimate: AIPriceEstimate, record: dict[str, Any], exc: AIUnavailable
+    ) -> PriceOutcome:
+        estimate.error_type = type(exc).__name__
+        estimate.error_message_safe = str(exc)[:500]
+        record.update(
+            finished_at=datetime.now(UTC).isoformat(),
+            success=0,
+            error_type=estimate.error_type,
+            error_message_safe=estimate.error_message_safe,
+        )
+        return PriceOutcome(estimate=estimate, call_log=record)
+
     def estimate(
         self,
         listing: Listing,
@@ -255,25 +280,24 @@ class PriceEstimator:
             "started_at": started_at.isoformat(),
         }
         payload = self.build_payload(listing, identity, ai_analysis, market, retail)
+        user_message = self.prompt.build_user_message(payload)
+        # Фото помогает прикинуть цену, когда модель неизвестна: по картинке
+        # видно тип, класс и явные дефекты. Как и в Level 1, зрение не должно
+        # ломать оценку — при отказе повторяем текстом.
+        image_urls = (
+            [listing.image_url]
+            if self.config.vision_enabled and listing.image_url
+            else None
+        )
         try:
-            result = self.client.structured(
-                system=self.prompt.system,
-                user=self.prompt.build_user_message(payload),
-                schema_name=self.prompt.schema_name,
-                schema=self.prompt.schema,
-                max_output_tokens=self.prompt.max_output_tokens,
-                model_override=self.config.price_model,
-            )
+            result = self._structured(user_message, image_urls)
         except AIUnavailable as exc:
-            estimate.error_type = type(exc).__name__
-            estimate.error_message_safe = str(exc)[:500]
-            record.update(
-                finished_at=datetime.now(UTC).isoformat(),
-                success=0,
-                error_type=estimate.error_type,
-                error_message_safe=estimate.error_message_safe,
-            )
-            return PriceOutcome(estimate=estimate, call_log=record)
+            if image_urls is None:
+                return self._failure(estimate, record, exc)
+            try:
+                result = self._structured(user_message, None)
+            except AIUnavailable as exc2:
+                return self._failure(estimate, record, exc2)
 
         self._finish(estimate, result, listing)
         record.update(

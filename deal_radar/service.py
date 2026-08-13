@@ -329,6 +329,43 @@ class DealRadarService:
                 self.storage.save_analysis(listing, analysis)
         return stats
 
+    # Типы объявлений, которые AI считает «не велосипедом» и которые уместно
+    # тихо не слать. COMPLETE_BICYCLE и OTHER сюда не входят: OTHER слишком
+    # размыт, чтобы глушить по нему, а спорные случаи должны дойти до человека.
+    _NON_BIKE_LISTING_TYPES = frozenset(
+        {"PARTS", "ACCESSORY", "FRAME_ONLY", "SERVICE_OR_RENTAL", "WANTED"}
+    )
+
+    def _ai_suppressed_keys(
+        self, analyzed: dict[str, tuple[Listing, ListingAnalysis]]
+    ) -> set[str]:
+        """Объявления, которые AI уверенно опознал как не-велосипед.
+
+        Единственный случай, когда классификации Level 1 разрешено убрать
+        карточку. Строго в одну сторону — только скрыть очевидный не-велосипед,
+        никогда не поднять статус и не тронуть цену. Предохранители: слой должен
+        быть включён, выведен из тени и явно допущен к статусам; уверенность —
+        не ниже порога; тип объявления — из списка не-велосипедов.
+        """
+
+        config = self.config.ai
+        if not (config.enabled and config.can_affect_deal_status and not config.shadow_mode):
+            return set()
+        suppressed: set[str] = set()
+        for key, (_listing, analysis) in analyzed.items():
+            ai = analysis.ai_analysis
+            if ai is None or ai.status != "AI_OK" or ai.classification is None:
+                continue
+            classification = ai.classification
+            if classification.is_bicycle:
+                continue
+            if classification.listing_type not in self._NON_BIKE_LISTING_TYPES:
+                continue
+            if classification.relevance_confidence < config.min_reject_confidence:
+                continue
+            suppressed.add(key)
+        return suppressed
+
     def _analyze_chunk(
         self,
         analyzer: ListingAnalyzer,
@@ -846,12 +883,21 @@ class DealRadarService:
                 self.storage.save_deal_evaluation(deal_evaluation)
                 self.storage.save_analysis(listing, analysis)
 
+        ai_suppressed_keys = self._ai_suppressed_keys(analyzed)
+
         now = datetime.now(UTC)
         notification_pool: list[tuple[Listing, ListingAnalysis, float]] = []
         for key, (listing, analysis) in analyzed.items():
             if key in suppress_keys:
                 continue
             if key in duplicate_suppressed_keys:
+                continue
+            if key in ai_suppressed_keys:
+                # AI уверенно решил, что это не велосипед (кресло, велотуфли,
+                # тренажёр, деталь) — карточка не уходит, но причина остаётся в базе.
+                analysis.notification_status = "excluded"
+                analysis.notification_reason = "ai_not_a_bicycle"
+                self.storage.save_analysis(listing, analysis)
                 continue
             first_seen = self.storage.first_seen_at(listing)
             age_hours = max(0.0, (now - first_seen.astimezone(UTC)).total_seconds() / 3600)

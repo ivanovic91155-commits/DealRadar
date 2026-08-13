@@ -163,8 +163,22 @@ class AIConfig:
     fallback_cached_input_usd_per_1m: float = 0.20
     fallback_output_usd_per_1m: float = 12.00
     prompt_name: str = "listing-analysis"
-    prompt_version: str = "v1.1.0"
+    prompt_version: str = "v1.2.0"
     prompts_path: str = ""  # пусто -> каталог, поставляемый вместе с пакетом
+
+    # --- Зрение: первое фото объявления уходит в Level 1 --------------------
+    # По фото модель надёжнее отличает настоящий велосипед от аксессуара
+    # (детское кресло, велотуфли, спиннинг-тренажёр) и опознаёт тип, когда текст
+    # пустой («Prodám kolo»). Модель зрения по умолчанию — основная (Luna);
+    # пусто здесь означает model_primary. detail="low" держит расход умеренным.
+    vision_enabled: bool = True
+    vision_model: str = ""
+    vision_detail: str = "low"  # low | high | auto
+    # Классификации разрешено убирать карточку, только когда она уверенно
+    # решила, что объявление — не велосипед. Порог намеренно высокий: пустой
+    # результат лучше, чем спрятанный настоящий велосипед. Само подавление
+    # включается лишь при can_affect_deal_status=true и shadow_mode=false.
+    min_reject_confidence: float = 0.75
 
     # --- Level 2: AI-оценка цены перепродажи -------------------------------
     # Отдельный kill switch: извлечение фактов и оценка денег включаются
@@ -212,6 +226,10 @@ class AIConfig:
             raise ValueError("ai.max_calls_per_cycle must not be negative")
         if self.max_title_chars < 50 or self.max_description_chars < 200:
             raise ValueError("ai text limits are too small to analyse a listing")
+        if self.vision_detail not in {"low", "high", "auto"}:
+            raise ValueError("ai.vision_detail must be one of low, high, auto")
+        if not 0 < self.min_reject_confidence <= 1:
+            raise ValueError("ai.min_reject_confidence must be between 0 and 1")
         if self.cache_ttl_hours < 0:
             raise ValueError("ai.cache_ttl_hours must not be negative")
         if self.daily_budget_usd < 0:
@@ -828,8 +846,14 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
                 float(ai_raw.get("fallback_output_usd_per_1m", 12.00)),
             ),
             prompt_name=str(ai_raw.get("prompt_name", "listing-analysis")),
-            prompt_version=str(ai_raw.get("prompt_version", "v1.1.0")),
+            prompt_version=str(ai_raw.get("prompt_version", "v1.2.0")),
             prompts_path=str(ai_raw.get("prompts_path", "")),
+            vision_enabled=_env_bool("AI_VISION_ENABLED", bool(ai_raw.get("vision_enabled", True))),
+            vision_model=_env_str("OPENAI_VISION_MODEL", str(ai_raw.get("vision_model", ""))),
+            vision_detail=_env_str("OPENAI_VISION_DETAIL", str(ai_raw.get("vision_detail", "low"))),
+            min_reject_confidence=_env_float(
+                "AI_MIN_REJECT_CONFIDENCE", float(ai_raw.get("min_reject_confidence", 0.75))
+            ),
             price_estimate_enabled=_env_bool(
                 "AI_PRICE_ESTIMATE_ENABLED", bool(ai_raw.get("price_estimate_enabled", False))
             ),

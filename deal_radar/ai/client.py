@@ -153,6 +153,27 @@ class OpenAIClient:
         key = self.config.api_key
         return text.replace(key, "***") if key else text
 
+    @staticmethod
+    def _user_content(
+        user: str, image_urls: list[str] | None, image_detail: str
+    ) -> str | list[dict[str, Any]]:
+        """Собрать content для user-сообщения.
+
+        Без картинок возвращаем строку — тело запроса тогда байт в байт такое
+        же, как до появления зрения. С картинками — массив частей Responses API:
+        ``input_text`` плюс ``input_image`` на каждое фото. Само изображение
+        уходит по ссылке, но модель получает его содержимое, а не задание его
+        «открыть».
+        """
+
+        urls = [url for url in (image_urls or []) if url]
+        if not urls:
+            return user
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": user}]
+        for url in urls:
+            content.append({"type": "input_image", "image_url": url, "detail": image_detail})
+        return content
+
     def structured(
         self,
         *,
@@ -162,16 +183,21 @@ class OpenAIClient:
         schema: dict[str, Any],
         max_output_tokens: int = 2000,
         model_override: str = "",
+        image_urls: list[str] | None = None,
+        image_detail: str = "low",
     ) -> AIResult:
         """Один structured-output запрос с ретраями и переходом на fallback-модель.
 
         ``model_override`` подменяет основную модель для задач, которым нужна
         другая: извлечение фактов и оценка цены стоят разных денег и требуют
-        разного качества рассуждения.
+        разного качества рассуждения. ``image_urls`` прикрепляет к запросу фото
+        объявления — модель судит по картинке о том, велосипед ли это и что за
+        велосипед.
         """
 
         if not self.config.api_key:
             raise AIAuthError("OPENAI_API_KEY is not configured")
+        user_content = self._user_content(user, image_urls, image_detail)
         primary = model_override or self.config.model_primary
         models: list[tuple[str, bool]] = [(primary, False)]
         if self.config.fallback_enabled and self.config.model_fallback != primary:
@@ -184,7 +210,7 @@ class OpenAIClient:
                     model_name=model_name,
                     used_fallback=used_fallback,
                     system=system,
-                    user=user,
+                    user=user_content,
                     schema_name=schema_name,
                     schema=schema,
                     max_output_tokens=max_output_tokens,
@@ -217,7 +243,7 @@ class OpenAIClient:
         model_name: str,
         used_fallback: bool,
         system: str,
-        user: str,
+        user: str | list[dict[str, Any]],
         schema_name: str,
         schema: dict[str, Any],
         max_output_tokens: int,

@@ -84,11 +84,11 @@ class ListingAnalyzer:
     def build_payload(self, listing: Listing, identity: BikeIdentity | None) -> dict[str, Any]:
         """Вход из раздела 5.1 ТЗ.
 
-        Осознанные отличия: не отправляем ни URL объявления, ни ссылки на
-        фотографии. Модель всё равно не может их открыть, зато раздел 7 запрещает
-        ей ссылаться на объявления и выдумывать URL — так соблазна просто нет.
-        Вместо ссылок идёт число фотографий, которого хватает для риск-флага
-        NO_PHOTOS.
+        Осознанное отличие: URL объявления в JSON не кладём — раздел 7 запрещает
+        модели ссылаться на объявления и выдумывать URL. Первое фото при этом
+        уходит отдельным каналом Responses API (``input_image``), а не как ссылка
+        в тексте: модель получает саму картинку, а не задание её «открыть».
+        В JSON остаётся только число фотографий — для риск-флага NO_PHOTOS.
         """
 
         hints: dict[str, Any] = {"possible_brand": None, "possible_model": None}
@@ -153,26 +153,29 @@ class ListingAnalyzer:
             "schema_version": self.prompt.schema_version,
             "started_at": started_at.isoformat(),
         }
+        user_message = self.prompt.build_user_message(self.build_payload(listing, identity))
+        image_urls = (
+            [listing.image_url]
+            if self.config.vision_enabled and listing.image_url
+            else None
+        )
+        vision_dropped = False
         try:
-            result = self.client.structured(
-                system=self.prompt.system,
-                user=self.prompt.build_user_message(self.build_payload(listing, identity)),
-                schema_name=self.prompt.schema_name,
-                schema=self.prompt.schema,
-                max_output_tokens=self.prompt.max_output_tokens,
-            )
+            result = self._structured(user_message, image_urls)
         except AIUnavailable as exc:
-            analysis.error_type = type(exc).__name__
-            analysis.error_message_safe = str(exc)[:500]
-            record.update(
-                finished_at=datetime.now(UTC).isoformat(),
-                success=0,
-                error_type=analysis.error_type,
-                error_message_safe=analysis.error_message_safe,
-            )
-            return AnalysisOutcome(analysis=analysis, call_log=record)
+            # Фото могло не понравиться модели (например, она не мультимодальна).
+            # Зрение не должно ухудшать текстовый разбор — повторяем без картинки.
+            if image_urls is None:
+                return self._failure(analysis, record, exc)
+            try:
+                result = self._structured(user_message, None)
+            except AIUnavailable as exc2:
+                return self._failure(analysis, record, exc2)
+            vision_dropped = True
 
         analysis = self._finish(listing, analysis, result)
+        if vision_dropped:
+            analysis.warnings.append("ai_vision_unavailable_text_only")
         record.update(
             finished_at=datetime.now(UTC).isoformat(),
             model_name=result.model_name,
@@ -187,6 +190,31 @@ class ListingAnalyzer:
             error_type=analysis.error_type,
             error_message_safe=analysis.error_message_safe,
             **self._costs(result),
+        )
+        return AnalysisOutcome(analysis=analysis, call_log=record)
+
+    def _structured(self, user_message: str, image_urls: list[str] | None) -> AIResult:
+        return self.client.structured(
+            system=self.prompt.system,
+            user=user_message,
+            schema_name=self.prompt.schema_name,
+            schema=self.prompt.schema,
+            max_output_tokens=self.prompt.max_output_tokens,
+            model_override=self.config.vision_model,
+            image_urls=image_urls,
+            image_detail=self.config.vision_detail,
+        )
+
+    def _failure(
+        self, analysis: AIAnalysis, record: dict[str, Any], exc: AIUnavailable
+    ) -> AnalysisOutcome:
+        analysis.error_type = type(exc).__name__
+        analysis.error_message_safe = str(exc)[:500]
+        record.update(
+            finished_at=datetime.now(UTC).isoformat(),
+            success=0,
+            error_type=analysis.error_type,
+            error_message_safe=analysis.error_message_safe,
         )
         return AnalysisOutcome(analysis=analysis, call_log=record)
 

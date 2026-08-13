@@ -65,7 +65,7 @@ class AiCheckTest(unittest.TestCase):
         config = write_config(self.root, {"enabled": True})
         with patch.dict(os.environ, {"OPENAI_API_KEY": SECRET}, clear=False):
             _, output = run(["--config", str(config), "ai-check"])
-        self.assertIn("Prompt version: listing-analysis-v1.1.0", output)
+        self.assertIn("Prompt version: listing-analysis-v1.2.0", output)
         self.assertIn("Schema version: dealradar.ai-analysis.v1", output)
         self.assertIn("Primary model configured: gpt-5.6-luna", output)
 
