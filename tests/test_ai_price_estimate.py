@@ -30,6 +30,7 @@ from deal_radar.config import (
     RetailConfig,
     SearchProfile,
     TelegramConfig,
+    TelegramGateConfig,
 )
 from deal_radar.deal_scoring import DealEvaluator
 from deal_radar.models import (
@@ -409,6 +410,9 @@ class CyclePhaseTest(unittest.TestCase):
             market_pricing=MarketPricingConfig(enabled=False),
             deal_scoring=DealScoringConfig(enabled=True),
             ai=AIConfig(**settings),
+            # Проверяется ценовая фаза, а не отбор карточек: у ворот Telegram
+            # своя сюита (tests/test_ai_gate.py).
+            telegram_gate=TelegramGateConfig(enabled=False),
         )
         config.validate()
         service = DealRadarService(config)

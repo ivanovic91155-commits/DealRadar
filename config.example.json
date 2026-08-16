@@ -46,6 +46,33 @@
       "include_promoted": false
     }
   ],
+  "facebook_marketplace": {
+    "enabled": false,
+    "base_url": "https://api.scrapecreators.com/v1/facebook/marketplace",
+    "timeout_seconds": 30,
+    "max_retries": 2,
+    "max_pages_per_profile": 1,
+    "results_per_page": 24,
+    "max_details_per_run": 0,
+    "date_listed": "last_24_hours",
+    "min_interval_seconds": 1200,
+    "profiles": [
+      {
+        "name": "Facebook — велосипеды в Праге",
+        "query": "kolo",
+        "lat": 50.0755,
+        "lng": 14.4378,
+        "radius_km": 60,
+        "enabled": true,
+        "expected_currency": "CZK",
+        "min_price": 1000,
+        "max_price": 100000,
+        "condition": "",
+        "require_any_keywords": [],
+        "exclude_title_keywords": []
+      }
+    ]
+  },
   "telegram": {
     "bot_token": "",
     "chat_id": ""
@@ -442,6 +469,90 @@
       "suspiciously low price",
       "manual review required"
     ]
+  },
+  "ai_opportunity_gate": {
+    "enabled": true,
+    "base_score": 25,
+    "analysis_min_score": 30,
+    "hidden_opportunity_bonus": 30,
+    "seller_urgency_bonus": {
+      "HIGH": 20,
+      "MEDIUM": 8,
+      "LOW": 0,
+      "UNKNOWN": 0
+    },
+    "listing_quality_bonus": {
+      "HIGH": 5,
+      "MEDIUM": 3,
+      "LOW": 0,
+      "UNKNOWN": 0
+    },
+    "identity_high_threshold": 0.8,
+    "identity_medium_threshold": 0.55,
+    "identity_high_bonus": 10,
+    "identity_medium_bonus": 5,
+    "unknown_identity_penalty": 5,
+    "valuable_information_bonus": 5,
+    "valuable_information_min_facts": 3,
+    "risk_penalty": {
+      "info": 0,
+      "minor": 5,
+      "medium": 15,
+      "severe": 40,
+      "blocking": 40
+    },
+    "risk_penalty_max": 40,
+    "block_non_bicycle": true,
+    "risk_severity": {
+      "NOT_A_BICYCLE": "blocking",
+      "PRICE_TOO_LOW": "minor",
+      "SUSPICIOUS_PRICE": "minor",
+      "NO_PHOTOS": "minor",
+      "VAGUE_DESCRIPTION": "minor",
+      "MISSING_PARTS": "minor",
+      "NO_DOCUMENTS": "medium",
+      "SHIPPING_ONLY": "medium",
+      "SELLER_AVOIDS_DETAILS": "medium",
+      "CONTRADICTORY_INFO": "medium",
+      "DAMAGED_CONDITION": "medium",
+      "EBIKE_MISSING_PARTS": "medium",
+      "ADVANCE_PAYMENT_REQUESTED": "severe",
+      "EXTERNAL_INSTRUCTIONS": "severe",
+      "SCAM_RISK": "blocking",
+      "STOLEN_RISK": "blocking"
+    }
+  },
+  "telegram_notification_gate": {
+    "enabled": true,
+    "hot_min_score": 0,
+    "interesting_min_score": 40,
+    "manual_review_min_score": 60,
+    "manual_review_require_strong_signal": true,
+    "strong_signals": [
+      "hidden_opportunity",
+      "seller_urgency_high",
+      "price_anomaly"
+    ],
+    "block_on_blocking_risk": true,
+    "status_base_score": {
+      "HOT": 55,
+      "INTERESTING": 40,
+      "MANUAL_REVIEW": 20,
+      "LOW_PRIORITY": 5,
+      "REJECT": 0
+    },
+    "profit_signal_max": 20,
+    "profit_signal_target_czk": 8000,
+    "roi_signal_max": 15,
+    "roi_signal_target_percent": 60,
+    "liquidity_signal_max": 10,
+    "confidence_signal_max": 10,
+    "hidden_opportunity_bonus": 20,
+    "urgency_high_bonus": 15,
+    "urgency_medium_bonus": 6,
+    "price_anomaly_bonus": 15,
+    "price_anomaly_min_discount_percent": 35,
+    "risk_penalty_max": 40
   },
   "priority": {
     "urgent_min_score": 80,

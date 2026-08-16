@@ -17,6 +17,16 @@ from deal_radar.ai.price_estimate import (
     needs_estimate,
     to_market_valuation,
 )
+from deal_radar.ai_gate import (
+    ACTION_BLOCKED,
+    ACTION_DEEP_ANALYSIS,
+    BLOCK,
+    NON_BIKE_LISTING_TYPES,
+    SEND,
+    analysis_priority,
+    read_signals,
+    telegram_decision,
+)
 from deal_radar.config import AppConfig
 from deal_radar.bike_identity import configure_identity, identify_listing
 from deal_radar.deal_scoring import DealEvaluator, select_deal_notifications
@@ -37,6 +47,7 @@ from deal_radar.pricing import valuation_cache_key
 from deal_radar.priority import build_analysis, dynamic_lookup_budget, select_lookup_candidates, select_notifications
 from deal_radar.sources.bazos import BazosSource
 from deal_radar.sources.cyklobazar import CyklobazarSource, parse_detail_description
+from deal_radar.sources.facebook import FacebookMarketplaceSource
 from deal_radar.storage import Storage
 from deal_radar.telegram import TelegramClient, format_czk
 
@@ -70,6 +81,7 @@ class DealRadarService:
             for profile in config.cyklobazar_profiles
             if profile.enabled
         )
+        self.sources.extend(self._facebook_sources())
         # Backoff по источникам объявлений: label -> (paused_until_monotonic, delay).
         # При 403/429 источник ставится на паузу с экспоненциальным ростом, чтобы
         # не долбить площадку и не спровоцировать блокировку.
@@ -78,6 +90,34 @@ class DealRadarService:
         self._ai_setup_logged = False
         self._price_estimator_cache: PriceEstimator | None = None
         self._price_setup_logged = False
+
+    def _facebook_sources(self) -> list[FacebookMarketplaceSource]:
+        """Профили Facebook Marketplace, если источник включён и настроен.
+
+        Отсутствие ключа выключает ровно этот источник: Bazoš и Cyklobazar
+        продолжают работать, а причина называется один раз при старте.
+        """
+
+        config = self.config.facebook_marketplace
+        if not config.enabled:
+            return []
+        if not config.api_key:
+            LOGGER.error(
+                "Facebook Marketplace is enabled but SCRAPECREATORS_API_KEY is empty; "
+                "set it in the deployment environment or turn FACEBOOK_MARKETPLACE_ENABLED off"
+            )
+            return []
+        profiles = config.active_profiles
+        if not profiles:
+            LOGGER.warning("Facebook Marketplace is enabled but no active profile is configured")
+            return []
+        LOGGER.info(
+            "Facebook Marketplace enabled: %d profile(s), up to %d credits per cycle, ~%d per month",
+            len(profiles),
+            len(profiles) * config.max_pages_per_profile,
+            config.credits_per_month(),
+        )
+        return [FacebookMarketplaceSource(profile, config) for profile in profiles]
 
     def close(self) -> None:
         self.storage.close()
@@ -330,11 +370,9 @@ class DealRadarService:
         return stats
 
     # Типы объявлений, которые AI считает «не велосипедом» и которые уместно
-    # тихо не слать. COMPLETE_BICYCLE и OTHER сюда не входят: OTHER слишком
-    # размыт, чтобы глушить по нему, а спорные случаи должны дойти до человека.
-    _NON_BIKE_LISTING_TYPES = frozenset(
-        {"PARTS", "ACCESSORY", "FRAME_ONLY", "SERVICE_OR_RENTAL", "WANTED"}
-    )
+    # тихо не слать. Один список на оба замка: подавление здесь и блокирующий
+    # риск в AI Gate.
+    _NON_BIKE_LISTING_TYPES = NON_BIKE_LISTING_TYPES
 
     def _ai_suppressed_keys(
         self, analyzed: dict[str, tuple[Listing, ListingAnalysis]]
@@ -344,14 +382,17 @@ class DealRadarService:
         Единственный случай, когда классификации Level 1 разрешено убрать
         карточку. Строго в одну сторону — только скрыть очевидный не-велосипед,
         никогда не поднять статус и не тронуть цену. Предохранители: слой должен
-        быть включён, выведен из тени и явно допущен к статусам; уверенность —
-        не ниже порога; тип объявления — из списка не-велосипедов.
+        быть выведен из тени, уверенность — не ниже порога, тип объявления — из
+        списка не-велосипедов.
+
+        ``can_affect_deal_status`` здесь намеренно не проверяется: этот флаг
+        разрешает AI влиять на статус сделки и на цену, а «это шлем, а не
+        велосипед» — вопрос релевантности. Из-за лишнего условия шлемы и детские
+        кресла уходили в Telegram у всех, кто оставил флаг статусов выключенным.
         """
 
         config = self.config.ai
-        if not (config.enabled and config.can_affect_deal_status and not config.shadow_mode):
-            return set()
-        suppressed: set[str] = set()
+        candidates: set[str] = set()
         for key, (_listing, analysis) in analyzed.items():
             ai = analysis.ai_analysis
             if ai is None or ai.status != "AI_OK" or ai.classification is None:
@@ -363,8 +404,105 @@ class DealRadarService:
                 continue
             if classification.relevance_confidence < config.min_reject_confidence:
                 continue
-            suppressed.add(key)
-        return suppressed
+            candidates.add(key)
+        if candidates and not (config.enabled and not config.shadow_mode):
+            # Молчать здесь нельзя: снаружи это выглядит как «AI смотрит на фото,
+            # но мусор всё равно приходит», а причина — один флаг окружения.
+            LOGGER.warning(
+                "AI marked %d listing(s) as not a bicycle, but the layer is in shadow mode "
+                "and cannot hide them; set AI_SHADOW_MODE=false to apply the verdict",
+                len(candidates),
+            )
+            return set()
+        return candidates
+
+    def _run_ai_gate(
+        self, analyzed: dict[str, tuple[Listing, ListingAnalysis]]
+    ) -> dict[str, int]:
+        """AI Opportunity Gate: превратить разбор Level 1 в приоритет анализа.
+
+        Нового вызова API здесь нет — только уже сохранённый JSON. Ворота никого
+        не выбрасывают: они решают, кому раньше достанется платный рыночный
+        анализ, и оставляют в базе объяснение своего числа.
+        """
+
+        config = self.config.ai_gate
+        if not config.enabled:
+            return {}
+        live = self.config.ai_signals_live
+        stats = {"ai_gate_passed": 0, "ai_gate_skipped": 0, "ai_gate_blocked": 0}
+        total = 0
+        for listing, analysis in analyzed.values():
+            signals = read_signals(analysis, config, live=live)
+            decision = analysis_priority(signals, config)
+            analysis.analysis_priority_score = decision.score
+            analysis.analysis_priority_reasons = decision.reasons
+            analysis.ai_gate_action = decision.action
+            total += decision.score
+            if decision.action == ACTION_DEEP_ANALYSIS:
+                stats["ai_gate_passed"] += 1
+            elif decision.action == ACTION_BLOCKED:
+                stats["ai_gate_blocked"] += 1
+            else:
+                stats["ai_gate_skipped"] += 1
+            LOGGER.info(
+                "AI_GATE listing=%s score=%d action=%s reasons=%s",
+                listing.key,
+                decision.score,
+                decision.action,
+                ",".join(decision.reasons),
+            )
+            self.storage.save_analysis(listing, analysis)
+        if analyzed:
+            stats["avg_analysis_priority"] = round(total / len(analyzed), 1)
+        return stats
+
+    def _run_telegram_gate(
+        self, pool: list[tuple[Listing, ListingAnalysis, float]]
+    ) -> dict[str, int]:
+        """Telegram Notification Gate: у каждой карточки должна быть причина.
+
+        Обычный ``MANUAL_REVIEW`` больше не уходит человеку только потому, что
+        нашёлся свободный слот: нужен сильный сигнал (скрытая возможность,
+        спешащий продавец, ценовая аномалия) либо достаточный notification
+        score. Решение сохраняется в анализе целиком — и число, и причина.
+        """
+
+        config = self.config.telegram_gate
+        if not config.enabled:
+            # Выключенные ворота не должны влиять и на порядок карточек: без
+            # notification_priority_score сортировка остаётся прежней.
+            return {}
+        stats = {
+            "telegram_gate_skipped": 0,
+            "telegram_gate_blocked": 0,
+            "manual_review_suppressed": 0,
+        }
+        total = 0
+        for listing, analysis, _age_hours in pool:
+            signals = read_signals(analysis, self.config.ai_gate, live=self.config.ai_signals_live)
+            decision = telegram_decision(analysis, signals, config)
+            analysis.notification_priority_score = decision.score
+            analysis.notification_reasons = decision.reasons
+            analysis.telegram_gate_action = decision.action
+            analysis.telegram_gate_reason = decision.reason
+            total += decision.score
+            status = analysis.deal_evaluation.status if analysis.deal_evaluation else "UNKNOWN"
+            if decision.action != SEND:
+                stats["telegram_gate_blocked" if decision.action == BLOCK else "telegram_gate_skipped"] += 1
+                if status == "MANUAL_REVIEW":
+                    stats["manual_review_suppressed"] += 1
+            LOGGER.info(
+                "TELEGRAM_GATE listing=%s status=%s notification_score=%d action=%s reason=%s",
+                listing.key,
+                status,
+                decision.score,
+                decision.action,
+                decision.reason,
+            )
+        if pool:
+            stats["avg_notification_priority"] = round(total / len(pool), 1)
+        return stats
 
     def _analyze_chunk(
         self,
@@ -779,6 +917,10 @@ class DealRadarService:
         # cross-source дубликаты.
         ai_stats = self._run_ai_analysis(analyzed, duplicate_suppressed_keys)
 
+        # AI Opportunity Gate. Считается до распределения слотов рыночного
+        # анализа: именно он и решает, кому эти слоты достанутся.
+        gate_stats = self._run_ai_gate(analyzed)
+
         lookup_budget = (
             dynamic_lookup_budget(len(new_listings), self.config.priority)
             if finder or market_finder
@@ -788,7 +930,11 @@ class DealRadarService:
             value for key, value in analyzed.items()
             if key not in suppress_keys and key not in duplicate_suppressed_keys
         ]
-        lookups = select_lookup_candidates(lookup_pool, lookup_budget)
+        lookups = select_lookup_candidates(
+            lookup_pool,
+            lookup_budget,
+            use_analysis_priority=self.config.ai_gate.enabled,
+        )
         lookup_count = 0
         consecutive_errors = 0
         market_http_requests: dict[str, int] = {}
@@ -855,6 +1001,9 @@ class DealRadarService:
             # которым достался слот глубокого анализа.
             analysis.ai_analysis = previous.ai_analysis
             analysis.ai_price = previous.ai_price
+            analysis.analysis_priority_score = previous.analysis_priority_score
+            analysis.analysis_priority_reasons = previous.analysis_priority_reasons
+            analysis.ai_gate_action = previous.ai_gate_action
             if consecutive_errors and market_valuation is None:
                 analysis.preliminary_priority_score = max(
                     analysis.preliminary_priority_score,
@@ -902,9 +1051,16 @@ class DealRadarService:
             first_seen = self.storage.first_seen_at(listing)
             age_hours = max(0.0, (now - first_seen.astimezone(UTC)).total_seconds() / 3600)
             notification_pool.append((listing, analysis, age_hours))
+        telegram_gate_stats: dict[str, int] = {}
         if self.config.deal_scoring.enabled:
+            telegram_gate_stats = self._run_telegram_gate(notification_pool)
+            eligible = (
+                [item for item in notification_pool if item[1].telegram_gate_action == SEND]
+                if self.config.telegram_gate.enabled
+                else notification_pool
+            )
             selected = select_deal_notifications(
-                notification_pool,
+                eligible,
                 self.config.deal_scoring,
                 max_cards=self.config.priority.max_telegram_cards,
                 manual_review_reserved_slots=self.config.priority.manual_review_reserved_slots,
@@ -915,6 +1071,7 @@ class DealRadarService:
         selected_keys = {listing.key for listing, _ in selected}
 
         sent = 0
+        sent_by_status: dict[str, int] = {}
         for listing, analysis in selected:
             try:
                 message_id = telegram.send_listing(
@@ -927,6 +1084,9 @@ class DealRadarService:
                 analysis.notification_reason = ""
                 self.storage.save_analysis(listing, analysis)
                 sent += 1
+                if analysis.deal_evaluation is not None:
+                    status = analysis.deal_evaluation.status
+                    sent_by_status[status] = sent_by_status.get(status, 0) + 1
                 valuation = analysis.valuation
                 LOGGER.info(
                     "Selected %s score=%d class=%s deal_status=%s deal_score=%s "
@@ -962,6 +1122,12 @@ class DealRadarService:
                     status, reason = "low_priority", "deal_status_low_priority_not_sent"
                 elif deal_status == "REJECT":
                     status, reason = "excluded", "deal_status_reject_not_sent"
+                elif analysis.telegram_gate_action == BLOCK:
+                    status = "excluded"
+                    reason = f"telegram_gate_{analysis.telegram_gate_reason or 'blocked'}"
+                elif analysis.telegram_gate_action not in {"", SEND}:
+                    status = "not_selected"
+                    reason = f"telegram_gate_{analysis.telegram_gate_reason or 'skipped'}"
                 else:
                     status, reason = "not_selected", "deal_notification_slots_or_policy"
             elif analysis.priority_class == "low_priority":
@@ -1015,11 +1181,16 @@ class DealRadarService:
             "deal_manual_review": sum(item.status == "MANUAL_REVIEW" for item in deal_values),
             "deal_low_priority": sum(item.status == "LOW_PRIORITY" for item in deal_values),
             "deal_reject": sum(item.status == "REJECT" for item in deal_values),
+            "hot_sent": sent_by_status.get("HOT", 0),
+            "interesting_sent": sent_by_status.get("INTERESTING", 0),
+            "manual_review_sent": sent_by_status.get("MANUAL_REVIEW", 0),
         }
         for source, count in market_http_requests.items():
             stats[f"market_http_{source}"] = count
         stats.update(ai_stats)
         stats.update(price_stats)
+        stats.update(gate_stats)
+        stats.update(telegram_gate_stats)
         LOGGER.info("Stage 2.2 cycle funnel: %s", stats)
         return stats
 

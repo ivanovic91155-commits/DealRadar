@@ -406,7 +406,7 @@ class MarketPriceEngine:
                 and item.listing_fingerprint == target_description_hash
                 and len(normalize_duplicate_text(target_description)) >= 80
             )
-            target_price = listing.price_czk or listing.price_amount
+            target_price = listing.comparable_price_czk
             same_price = bool(
                 target_price
                 and item.price_czk

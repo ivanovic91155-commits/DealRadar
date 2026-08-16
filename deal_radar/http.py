@@ -36,6 +36,36 @@ def get_bytes(
         raise HttpError(f"GET {url} failed: {exc}") from exc
 
 
+def get_json(
+    url: str,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """GET с разбором JSON. В ошибке сохраняется HTTP-статус.
+
+    ``get_bytes`` статус не отдаёт, а политика повторов у платного API строится
+    именно на нём: 402 повторять бессмысленно, 429 и 5xx — нужно.
+    """
+
+    query = urllib.parse.urlencode(
+        {key: value for key, value in (params or {}).items() if value is not None}
+    )
+    request = urllib.request.Request(
+        f"{url}?{query}" if query else url,
+        headers={"User-Agent": USER_AGENT, "Accept": "application/json", **(headers or {})},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # Тело ответа в сообщение не попадает: в нём может оказаться эхо
+        # запроса вместе с ключом.
+        raise HttpError(f"GET {url} failed with HTTP {exc.code}", exc.code) from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise HttpError(f"GET {url} failed: {type(exc).__name__}") from exc
+
+
 def post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: int = 90) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(

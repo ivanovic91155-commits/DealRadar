@@ -89,6 +89,114 @@ class CyklobazarProfile:
 
 
 @dataclass(slots=True)
+class FacebookMarketplaceProfile:
+    """Один поиск по Facebook Marketplace через ScrapeCreators.
+
+    Координаты вместо URL: у Marketplace нет ни RSS, ни стабильной страницы
+    выдачи, поиск задаётся точкой и радиусом.
+    """
+
+    name: str
+    query: str
+    lat: float
+    lng: float
+    radius_km: int = 60
+    enabled: bool = True
+    # Валюта, которую ожидаем от площадки в этой локации. Ответ ScrapeCreators
+    # отдаёт цену строкой вида "12 000 Kč", символ бывает неоднозначным, поэтому
+    # у профиля есть ожидание — но оно только запасной вариант, а не подмена.
+    expected_currency: str = "CZK"
+    min_price: int | None = None
+    max_price: int | None = None
+    condition: str = ""  # new | used_like_new | used_good | used_fair
+    require_any_keywords: list[str] = field(default_factory=list)
+    exclude_title_keywords: list[str] = field(default_factory=list)
+
+    def validate(self) -> None:
+        if not self.name or not self.query:
+            raise ValueError("facebook_marketplace profile needs a name and a query")
+        if not -90 <= self.lat <= 90 or not -180 <= self.lng <= 180:
+            raise ValueError(f"Profile {self.name!r} has coordinates outside the world")
+        if not 1 <= self.radius_km <= 500:
+            raise ValueError(f"Profile {self.name!r} must use a radius between 1 and 500 km")
+        if len(self.expected_currency) != 3:
+            raise ValueError(f"Profile {self.name!r} needs a three-letter currency code")
+        allowed_conditions = {"", "new", "used_like_new", "used_good", "used_fair"}
+        if self.condition not in allowed_conditions:
+            raise ValueError(f"Profile {self.name!r} has an unknown condition {self.condition!r}")
+        if (
+            self.min_price is not None
+            and self.max_price is not None
+            and self.min_price > self.max_price
+        ):
+            raise ValueError(f"Profile {self.name!r} has an inverted price range")
+
+
+@dataclass(slots=True)
+class FacebookMarketplaceConfig:
+    """Источник Facebook Marketplace поверх ScrapeCreators API.
+
+    Каждый поиск стоит кредит, поэтому расход ограничен со всех сторон: один
+    запрос на профиль за цикл, страницы только при ``has_next_page``, детальные
+    карточки по умолчанию выключены.
+    """
+
+    enabled: bool = False
+    api_key: str = ""  # только из окружения, в JSON не хранится
+    base_url: str = "https://api.scrapecreators.com/v1/facebook/marketplace"
+    timeout_seconds: int = 30
+    max_retries: int = 2
+    max_pages_per_profile: int = 1
+    results_per_page: int = 24
+    max_details_per_run: int = 0
+    date_listed: str = "last_24_hours"
+    # Общий цикл проекта короче интервала (по умолчанию 420 секунд), а каждый
+    # поиск здесь стоит денег: без собственного интервала один профиль сжёг бы
+    # все 6100 credits за месяц. Источник опрашивается не чаще этого значения —
+    # 1200 секунд (20 минут) даёт 2160 credits в месяц на профиль.
+    min_interval_seconds: int = 1200
+    profiles: list[FacebookMarketplaceProfile] = field(default_factory=list)
+
+    def validate(self) -> None:
+        if urlparse(self.base_url).scheme != "https":
+            raise ValueError("facebook_marketplace.base_url must use HTTPS")
+        if not 5 <= self.timeout_seconds <= 300:
+            raise ValueError("facebook_marketplace.timeout_seconds must be between 5 and 300")
+        if not 0 <= self.max_retries <= 5:
+            raise ValueError("facebook_marketplace.max_retries must be between 0 and 5")
+        if not 1 <= self.max_pages_per_profile <= 10:
+            raise ValueError("facebook_marketplace.max_pages_per_profile must be between 1 and 10")
+        if not 1 <= self.results_per_page <= 100:
+            raise ValueError("facebook_marketplace.results_per_page must be between 1 and 100")
+        if self.max_details_per_run < 0:
+            raise ValueError("facebook_marketplace.max_details_per_run must not be negative")
+        if self.min_interval_seconds < 0:
+            raise ValueError("facebook_marketplace.min_interval_seconds must not be negative")
+        allowed_dates = {"all", "1", "7", "30", "last_24_hours", "last_7_days", "last_30_days"}
+        if self.date_listed not in allowed_dates:
+            raise ValueError(f"facebook_marketplace.date_listed must be one of {sorted(allowed_dates)}")
+        for profile in self.profiles:
+            profile.validate()
+
+    @property
+    def active_profiles(self) -> list[FacebookMarketplaceProfile]:
+        return [profile for profile in self.profiles if profile.enabled]
+
+    def credits_per_month(self, polls_per_day: int | None = None) -> int:
+        """Верхняя граница расхода за месяц (раздел «Экономия credits»).
+
+        Считается по собственному интервалу источника, а не по общему циклу:
+        именно он и определяет, сколько запросов реально уходит.
+        """
+
+        if polls_per_day is None:
+            polls_per_day = (
+                86_400 // self.min_interval_seconds if self.min_interval_seconds > 0 else 86_400
+            )
+        return len(self.active_profiles) * polls_per_day * 30 * self.max_pages_per_profile
+
+
+@dataclass(slots=True)
 class TelegramConfig:
     bot_token: str = ""
     chat_id: str = ""
@@ -684,6 +792,160 @@ class DealScoringConfig:
             raise ValueError("deal_scoring condition scores must be between 0 and 100")
 
 
+def _default_risk_severity() -> dict[str, str]:
+    """Тяжесть риск-флагов Level 1. Новых флагов не вводим: слева — значения
+    enum из ``schema.json`` и булевы поля блока ``risk``; ``*_MISSING_PARTS`` и
+    ``DAMAGED_CONDITION`` собираются из существующего блока ``condition``."""
+
+    return {
+        "NOT_A_BICYCLE": "blocking",
+        "PRICE_TOO_LOW": "minor",
+        "SUSPICIOUS_PRICE": "minor",
+        "NO_PHOTOS": "minor",
+        "VAGUE_DESCRIPTION": "minor",
+        "MISSING_PARTS": "minor",
+        "NO_DOCUMENTS": "medium",
+        "SHIPPING_ONLY": "medium",
+        "SELLER_AVOIDS_DETAILS": "medium",
+        "CONTRADICTORY_INFO": "medium",
+        "DAMAGED_CONDITION": "medium",
+        "EBIKE_MISSING_PARTS": "medium",
+        "ADVANCE_PAYMENT_REQUESTED": "severe",
+        "EXTERNAL_INSTRUCTIONS": "severe",
+        "SCAM_RISK": "blocking",
+        "STOLEN_RISK": "blocking",
+    }
+
+
+RISK_SEVERITIES = ("info", "minor", "medium", "severe", "blocking")
+
+
+@dataclass(slots=True)
+class AIGateConfig:
+    """AI Opportunity Gate: насколько объявление достойно дальнейшей проверки.
+
+    Слой детерминированный и нового запроса к модели не делает — он читает уже
+    сохранённый разбор Level 1. Главный принцип: ``listing_quality=LOW`` само по
+    себе почти ничего не стоит, потому что плохо оформленные объявления и есть
+    самая интересная зона для перепродажи. Наказывается не небрежность
+    продавца, а отсутствие информации вместе с отсутствием причины.
+    """
+
+    enabled: bool = True
+    # Нейтральная середина: с неё начинают и объявления без AI-разбора, поэтому
+    # отсутствие анализа не отбрасывает объявление в конец очереди.
+    base_score: int = 25
+    analysis_min_score: int = 30
+    hidden_opportunity_bonus: int = 30
+    seller_urgency_bonus: dict[str, int] = field(
+        default_factory=lambda: {"HIGH": 20, "MEDIUM": 8, "LOW": 0, "UNKNOWN": 0}
+    )
+    listing_quality_bonus: dict[str, int] = field(
+        default_factory=lambda: {"HIGH": 5, "MEDIUM": 3, "LOW": 0, "UNKNOWN": 0}
+    )
+    identity_high_threshold: float = 0.80
+    identity_medium_threshold: float = 0.55
+    identity_high_bonus: int = 10
+    identity_medium_bonus: int = 5
+    unknown_identity_penalty: int = 5
+    # Бонус за факты, которых не дал детерминированный разбор: модель, год, тип,
+    # размер рамы и колёс, трансмиссия, материал, состояние.
+    valuable_information_bonus: int = 5
+    valuable_information_min_facts: int = 3
+    risk_penalty: dict[str, int] = field(
+        default_factory=lambda: {
+            "info": 0,
+            "minor": 5,
+            "medium": 15,
+            "severe": 40,
+            "blocking": 40,
+        }
+    )
+    risk_penalty_max: int = 40
+    risk_severity: dict[str, str] = field(default_factory=_default_risk_severity)
+    # Вердикт «это не велосипед» с уверенностью ниже порога подавления всё равно
+    # не должен доходить до Telegram: карточка остаётся в базе, но не уходит.
+    block_non_bicycle: bool = True
+
+    def validate(self) -> None:
+        if not 0 <= self.base_score <= 100:
+            raise ValueError("ai_opportunity_gate.base_score must be between 0 and 100")
+        if not 0 <= self.analysis_min_score <= 100:
+            raise ValueError("ai_opportunity_gate.analysis_min_score must be between 0 and 100")
+        if not 0 <= self.identity_medium_threshold <= self.identity_high_threshold <= 1:
+            raise ValueError("ai_opportunity_gate identity thresholds must satisfy 0 <= medium <= high <= 1")
+        if self.risk_penalty_max < 0:
+            raise ValueError("ai_opportunity_gate.risk_penalty_max must not be negative")
+        if any(value < 0 for value in self.risk_penalty.values()):
+            raise ValueError("ai_opportunity_gate risk penalties must not be negative")
+        unknown_severities = set(self.risk_penalty) - set(RISK_SEVERITIES)
+        unknown_severities |= set(self.risk_severity.values()) - set(RISK_SEVERITIES)
+        if unknown_severities:
+            raise ValueError(f"Unknown risk severities: {sorted(unknown_severities)}")
+
+
+@dataclass(slots=True)
+class TelegramGateConfig:
+    """Telegram Notification Gate: насколько объявление достойно внимания человека.
+
+    Второй, независимый от analysis priority score. Деньги, ликвидность и
+    уверенность берутся готовыми из оценки сделки — новых финансовых формул
+    здесь нет; добавляются только сигналы AI, которых у ``deal_score`` нет.
+    """
+
+    enabled: bool = True
+    hot_min_score: int = 0
+    interesting_min_score: int = 40
+    manual_review_min_score: int = 60
+    # Спасательный круг для MANUAL_REVIEW: сильный сигнал отправляет карточку
+    # даже при невысоком score. Выключение оставляет только порог по score.
+    manual_review_require_strong_signal: bool = True
+    strong_signals: list[str] = field(
+        default_factory=lambda: ["hidden_opportunity", "seller_urgency_high", "price_anomaly"]
+    )
+    block_on_blocking_risk: bool = True
+    status_base_score: dict[str, int] = field(
+        default_factory=lambda: {
+            "HOT": 55,
+            "INTERESTING": 40,
+            "MANUAL_REVIEW": 20,
+            "LOW_PRIORITY": 5,
+            "REJECT": 0,
+        }
+    )
+    profit_signal_max: int = 20
+    profit_signal_target_czk: float = 8000.0
+    roi_signal_max: int = 15
+    roi_signal_target_percent: float = 60.0
+    liquidity_signal_max: int = 10
+    confidence_signal_max: int = 10
+    hidden_opportunity_bonus: int = 20
+    urgency_high_bonus: int = 15
+    urgency_medium_bonus: int = 6
+    price_anomaly_bonus: int = 15
+    price_anomaly_min_discount_percent: float = 35.0
+    risk_penalty_max: int = 40
+
+    def validate(self) -> None:
+        thresholds = (
+            self.hot_min_score,
+            self.interesting_min_score,
+            self.manual_review_min_score,
+        )
+        if any(not 0 <= value <= 100 for value in thresholds):
+            raise ValueError("telegram_notification_gate thresholds must be between 0 and 100")
+        if self.profit_signal_target_czk <= 0 or self.roi_signal_target_percent <= 0:
+            raise ValueError("telegram_notification_gate signal targets must be positive")
+        if not 0 <= self.price_anomaly_min_discount_percent <= 100:
+            raise ValueError(
+                "telegram_notification_gate.price_anomaly_min_discount_percent must be between 0 and 100"
+            )
+        known_signals = {"hidden_opportunity", "seller_urgency_high", "price_anomaly"}
+        unknown = set(self.strong_signals) - known_signals
+        if unknown:
+            raise ValueError(f"Unknown telegram_notification_gate strong signals: {sorted(unknown)}")
+
+
 @dataclass(slots=True)
 class AppConfig:
     database_path: str = "data/deal_radar.sqlite3"
@@ -700,6 +962,9 @@ class AppConfig:
     cyklobazar_detail_budget: int = 20
     profiles: list[SearchProfile] = field(default_factory=list)
     cyklobazar_profiles: list[CyklobazarProfile] = field(default_factory=list)
+    facebook_marketplace: FacebookMarketplaceConfig = field(
+        default_factory=FacebookMarketplaceConfig
+    )
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     identity: IdentityConfig = field(default_factory=IdentityConfig)
     ai: AIConfig = field(default_factory=AIConfig)
@@ -707,6 +972,20 @@ class AppConfig:
     market_pricing: MarketPricingConfig = field(default_factory=MarketPricingConfig)
     priority: PriorityConfig = field(default_factory=PriorityConfig)
     deal_scoring: DealScoringConfig = field(default_factory=DealScoringConfig)
+    ai_gate: AIGateConfig = field(default_factory=AIGateConfig)
+    telegram_gate: TelegramGateConfig = field(default_factory=TelegramGateConfig)
+
+    @property
+    def ai_signals_live(self) -> bool:
+        """Читать ли сигналы AI в воротах.
+
+        Shadow-режим означает ровно то, что обещает README: результат только
+        сохраняется. Пока слой в тени, ворота работают на детерминированных
+        данных сделки, а поля Level 1 не влияют ни на очередь анализа, ни на
+        отправку.
+        """
+
+        return self.ai.enabled and not self.ai.shadow_mode
 
     def validate(self) -> None:
         if self.bootstrap_mode not in {"send_latest", "skip_existing", "send_all"}:
@@ -717,18 +996,28 @@ class AppConfig:
             raise ValueError("feedback_poll_interval_seconds must be between 2 and 300")
         if not 0 <= self.cyklobazar_detail_budget <= 100:
             raise ValueError("cyklobazar_detail_budget must be between 0 and 100")
-        if not self.profiles and not any(profile.enabled for profile in self.cyklobazar_profiles):
+        has_facebook = self.facebook_marketplace.enabled and bool(
+            self.facebook_marketplace.active_profiles
+        )
+        if (
+            not self.profiles
+            and not any(profile.enabled for profile in self.cyklobazar_profiles)
+            and not has_facebook
+        ):
             raise ValueError("At least one marketplace search profile is required")
         for profile in self.profiles:
             profile.validate()
         for profile in self.cyklobazar_profiles:
             profile.validate()
+        self.facebook_marketplace.validate()
         self.identity.validate()
         self.ai.validate()
         self.retail.validate()
         self.market_pricing.validate()
         self.priority.validate()
         self.deal_scoring.validate()
+        self.ai_gate.validate()
+        self.telegram_gate.validate()
 
 
 def load_config(path: str | Path = "config.json") -> AppConfig:
@@ -747,6 +1036,9 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
     market_raw = raw.get("market_pricing", {})
     priority_raw = raw.get("priority", {})
     deal_raw = raw.get("deal_scoring", {})
+    facebook_raw = raw.get("facebook_marketplace", {})
+    ai_gate_raw = raw.get("ai_opportunity_gate", {})
+    telegram_gate_raw = raw.get("telegram_notification_gate", {})
     codex_env = os.getenv("DEAL_RADAR_CODEX_ENABLED", "").strip().casefold()
     config = AppConfig(
         database_path=raw.get("database_path", "data/deal_radar.sqlite3"),
@@ -765,6 +1057,43 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
         cyklobazar_profiles=[
             CyklobazarProfile(**profile) for profile in raw.get("cyklobazar_profiles", [])
         ],
+        facebook_marketplace=FacebookMarketplaceConfig(
+            enabled=_env_bool(
+                "FACEBOOK_MARKETPLACE_ENABLED", bool(facebook_raw.get("enabled", False))
+            ),
+            # Ключ живёт только в окружении: ни в JSON, ни в git, ни в логах.
+            api_key=os.getenv("SCRAPECREATORS_API_KEY", "").strip(),
+            base_url=str(
+                facebook_raw.get("base_url", FacebookMarketplaceConfig().base_url)
+            ),
+            timeout_seconds=_env_int(
+                "FACEBOOK_MARKETPLACE_TIMEOUT_SECONDS", int(facebook_raw.get("timeout_seconds", 30))
+            ),
+            max_retries=_env_int(
+                "FACEBOOK_MARKETPLACE_MAX_RETRIES", int(facebook_raw.get("max_retries", 2))
+            ),
+            max_pages_per_profile=_env_int(
+                "FACEBOOK_MARKETPLACE_MAX_PAGES_PER_PROFILE",
+                int(facebook_raw.get("max_pages_per_profile", 1)),
+            ),
+            results_per_page=_env_int(
+                "FACEBOOK_MARKETPLACE_RESULTS_PER_PAGE",
+                int(facebook_raw.get("results_per_page", 24)),
+            ),
+            max_details_per_run=_env_int(
+                "FACEBOOK_MARKETPLACE_MAX_DETAILS_PER_RUN",
+                int(facebook_raw.get("max_details_per_run", 0)),
+            ),
+            date_listed=str(facebook_raw.get("date_listed", "last_24_hours")),
+            min_interval_seconds=_env_int(
+                "FACEBOOK_MARKETPLACE_MIN_INTERVAL_SECONDS",
+                int(facebook_raw.get("min_interval_seconds", 1200)),
+            ),
+            profiles=[
+                FacebookMarketplaceProfile(**profile)
+                for profile in facebook_raw.get("profiles", [])
+            ],
+        ),
         telegram=TelegramConfig(
             bot_token=os.getenv("TELEGRAM_BOT_TOKEN", telegram_raw.get("bot_token", "")),
             chat_id=os.getenv("TELEGRAM_CHAT_ID", str(telegram_raw.get("chat_id", ""))),
@@ -1143,6 +1472,85 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
                     DealScoringConfig().manual_review_risk_terms,
                 )
             ],
+        ),
+        ai_gate=AIGateConfig(
+            enabled=_env_bool("AI_OPPORTUNITY_GATE_ENABLED", bool(ai_gate_raw.get("enabled", True))),
+            base_score=int(ai_gate_raw.get("base_score", 25)),
+            analysis_min_score=_env_int(
+                "AI_GATE_ANALYSIS_MIN_SCORE", int(ai_gate_raw.get("analysis_min_score", 30))
+            ),
+            hidden_opportunity_bonus=_env_int(
+                "AI_GATE_HIDDEN_OPPORTUNITY_BONUS",
+                int(ai_gate_raw.get("hidden_opportunity_bonus", 30)),
+            ),
+            seller_urgency_bonus={
+                **AIGateConfig().seller_urgency_bonus,
+                **{str(key).upper(): int(value) for key, value in ai_gate_raw.get("seller_urgency_bonus", {}).items()},
+            },
+            listing_quality_bonus={
+                **AIGateConfig().listing_quality_bonus,
+                **{str(key).upper(): int(value) for key, value in ai_gate_raw.get("listing_quality_bonus", {}).items()},
+            },
+            identity_high_threshold=float(ai_gate_raw.get("identity_high_threshold", 0.80)),
+            identity_medium_threshold=float(ai_gate_raw.get("identity_medium_threshold", 0.55)),
+            identity_high_bonus=int(ai_gate_raw.get("identity_high_bonus", 10)),
+            identity_medium_bonus=int(ai_gate_raw.get("identity_medium_bonus", 5)),
+            unknown_identity_penalty=int(ai_gate_raw.get("unknown_identity_penalty", 5)),
+            valuable_information_bonus=int(ai_gate_raw.get("valuable_information_bonus", 5)),
+            valuable_information_min_facts=int(ai_gate_raw.get("valuable_information_min_facts", 3)),
+            risk_penalty={
+                **AIGateConfig().risk_penalty,
+                **{str(key): int(value) for key, value in ai_gate_raw.get("risk_penalty", {}).items()},
+            },
+            risk_penalty_max=int(ai_gate_raw.get("risk_penalty_max", 40)),
+            risk_severity={
+                **_default_risk_severity(),
+                **{str(key).upper(): str(value) for key, value in ai_gate_raw.get("risk_severity", {}).items()},
+            },
+            block_non_bicycle=bool(ai_gate_raw.get("block_non_bicycle", True)),
+        ),
+        telegram_gate=TelegramGateConfig(
+            enabled=_env_bool(
+                "TELEGRAM_NOTIFICATION_GATE_ENABLED", bool(telegram_gate_raw.get("enabled", True))
+            ),
+            hot_min_score=int(telegram_gate_raw.get("hot_min_score", 0)),
+            interesting_min_score=_env_int(
+                "TELEGRAM_INTERESTING_MIN_SCORE",
+                int(telegram_gate_raw.get("interesting_min_score", 40)),
+            ),
+            manual_review_min_score=_env_int(
+                "TELEGRAM_MANUAL_REVIEW_MIN_SCORE",
+                int(telegram_gate_raw.get("manual_review_min_score", 60)),
+            ),
+            manual_review_require_strong_signal=_env_bool(
+                "TELEGRAM_MANUAL_REVIEW_REQUIRE_STRONG_SIGNAL",
+                bool(telegram_gate_raw.get("manual_review_require_strong_signal", True)),
+            ),
+            strong_signals=[
+                str(value)
+                for value in telegram_gate_raw.get(
+                    "strong_signals", TelegramGateConfig().strong_signals
+                )
+            ],
+            block_on_blocking_risk=bool(telegram_gate_raw.get("block_on_blocking_risk", True)),
+            status_base_score={
+                **TelegramGateConfig().status_base_score,
+                **{str(key).upper(): int(value) for key, value in telegram_gate_raw.get("status_base_score", {}).items()},
+            },
+            profit_signal_max=int(telegram_gate_raw.get("profit_signal_max", 20)),
+            profit_signal_target_czk=float(telegram_gate_raw.get("profit_signal_target_czk", 8000)),
+            roi_signal_max=int(telegram_gate_raw.get("roi_signal_max", 15)),
+            roi_signal_target_percent=float(telegram_gate_raw.get("roi_signal_target_percent", 60)),
+            liquidity_signal_max=int(telegram_gate_raw.get("liquidity_signal_max", 10)),
+            confidence_signal_max=int(telegram_gate_raw.get("confidence_signal_max", 10)),
+            hidden_opportunity_bonus=int(telegram_gate_raw.get("hidden_opportunity_bonus", 20)),
+            urgency_high_bonus=int(telegram_gate_raw.get("urgency_high_bonus", 15)),
+            urgency_medium_bonus=int(telegram_gate_raw.get("urgency_medium_bonus", 6)),
+            price_anomaly_bonus=int(telegram_gate_raw.get("price_anomaly_bonus", 15)),
+            price_anomaly_min_discount_percent=float(
+                telegram_gate_raw.get("price_anomaly_min_discount_percent", 35)
+            ),
+            risk_penalty_max=int(telegram_gate_raw.get("risk_penalty_max", 40)),
         ),
     )
     config.validate()

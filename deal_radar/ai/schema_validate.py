@@ -191,6 +191,17 @@ def parse_listing_analysis(payload: dict[str, Any], schema: dict[str, Any]) -> V
     )
     if identity.model is None:
         identity.manual_identification_needed = True
+    if not classification.is_bicycle and (identity.brand or identity.model):
+        # У шлема POC Axion есть и бренд, и модель — только это не велосипед.
+        # Если оставить их в разборе, карточка озаглавится «🚲 POC Axion», а
+        # рыночная оценка пойдёт искать аналоги несуществующего велосипеда.
+        # Тип и признак электро остаются: они помогают человеку при разборе.
+        warnings.append("ai_identity_dropped_not_a_bicycle")
+        identity.brand = None
+        identity.model = None
+        identity.generation = None
+        identity.model_year = None
+        identity.manual_identification_needed = True
 
     specifications_raw = _block(payload, "specifications")
     specifications = AISpecifications(

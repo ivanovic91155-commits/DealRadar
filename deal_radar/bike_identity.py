@@ -167,15 +167,35 @@ ACCESSORY_WORDS = {
     # к продаваемому велосипеду, поэтому отсекаем до платного вызова AI.
     "sedacka", "tretry", "spinning", "trenazer", "rotoped",
 }
+# Экипировка и мелкое навесное. Эти слова отличаются от ACCESSORY_WORDS тем, что
+# вполне могут стоять рядом с настоящим велосипедом («prodám kolo Trek + helma
+# zdarma»), поэтому они срабатывают только тогда, когда в заголовке нет самого
+# велосипеда: «Helma POC Axion» — шлем, «Kolo Trek a helma» — велосипед.
+# Слова сравниваются подстрокой, как и в ACCESSORY_WORDS, поэтому короткие
+# формы сюда не попадают: "dres" живёт внутри "adresa" и утащил бы за собой
+# настоящий велосипед с адресом в заголовке.
+GEAR_WORDS = {
+    "helma", "helmu", "helmy", "prilba", "prilbu", "prilby", "přilba",
+    "bryle", "brýle", "rukavice", "cyklodres", "cyklisticke boty",
+    "batoh", "zamek", "blatnik", "blatniky", "nosic", "kosik", "bidon",
+    "pumpa", "hustilka", "tachometr", "cyklopocitac", "cyklocomputer",
+}
 # Продажа рамы отдельно: "prodám rám Trek", "rámec bez vidlice". Одиночное слово
 # "ram" в ACCESSORY_WORDS занести нельзя — оно встречается в размере рамы.
 # "X na kolo" — почти всегда аксессуар *для* велосипеда (sedačka na kolo,
 # tretry na kolo, držák na kolo): сам велосипед в заголовке зовётся "kolo",
-# а не "na kolo".
+# а не "na kolo". Форма винительного падежа "kolo" здесь главная и самая
+# частая, поэтому окончание перечисляется явно.
 ACCESSORY_PHRASES_RE = re.compile(
     r"\b(?:prodam|prodej|pouze|jen|samotny|nabizim)\s+ram(?:ec|u)?\b"
     r"|\bram(?:ec|u)?\s+(?:bez|z)\b"
-    r"|\bna\s+kola?\b"
+    r"|\bna\s+kol(?:o|a|e|ech)?\b"
+)
+# Сам велосипед в заголовке. Без этих слов экипировка продаётся сама по себе.
+# Падежные формы «kolo» перечислены целиком: «na 29 kolech» — это всё ещё
+# велосипед, и терять его из-за слова «nosič» в том же заголовке нельзя.
+BIKE_NOUNS_RE = re.compile(
+    r"\b(?:kol(?:o|a|e|em|ech|y|um)?|bicykl\w*|elektrokolo\w*|ebike|e-bike|bike|bicycle|fahrrad|rower)\b"
 )
 USED_WORDS = {"bazar", "pouzite", "pouzity", "refurbished", "repasovane", "repasovany", "used"}
 UNAVAILABLE_WORDS = {"neni skladem", "out of stock", "unavailable", "vyprodano"}
@@ -486,7 +506,14 @@ def has_accessory_terms(text: str) -> bool:
     normalized = normalize_text(text)
     if ACCESSORY_PHRASES_RE.search(normalized):
         return True
-    return any(normalize_text(word) in normalized for word in ACCESSORY_WORDS)
+    if any(normalize_text(word) in normalized for word in ACCESSORY_WORDS):
+        return True
+    # Экипировка считается предметом продажи только тогда, когда в заголовке нет
+    # самого велосипеда: «Helma POC Axion» — шлем, а «Kolo Trek + helma» — всё
+    # ещё велосипед, и терять его из-за подарка продавца нельзя.
+    if BIKE_NOUNS_RE.search(normalized):
+        return False
+    return any(normalize_text(word) in normalized for word in GEAR_WORDS)
 
 
 def hard_filter_reason(

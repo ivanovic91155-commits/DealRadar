@@ -216,6 +216,42 @@ class ValidationTest(unittest.TestCase):
         self.assertIsNone(result.identity.model)
         self.assertIn("ai_model_repeated_brand_discarded", result.warnings)
 
+    def test_identity_of_a_non_bicycle_is_discarded(self) -> None:
+        # У шлема POC Axion есть бренд и модель. Если оставить их в разборе,
+        # карточка озаглавится «🚲 POC Axion», а оценка пойдёт искать аналоги
+        # велосипеда, которого не существует.
+        result = parse_listing_analysis(
+            payload(
+                classification={
+                    "is_bicycle": False,
+                    "listing_type": "ACCESSORY",
+                    "relevance_confidence": 0.62,
+                },
+                identity={
+                    "brand": "POC",
+                    "model": "Axion",
+                    "generation": None,
+                    "model_year": 2024,
+                    "bike_type": None,
+                    "is_electric": None,
+                    "identity_confidence": 0.8,
+                    "manual_identification_needed": False,
+                },
+            ),
+            SCHEMA,
+        )
+        self.assertIsNone(result.identity.brand)
+        self.assertIsNone(result.identity.model)
+        self.assertIsNone(result.identity.model_year)
+        self.assertTrue(result.identity.manual_identification_needed)
+        self.assertIn("ai_identity_dropped_not_a_bicycle", result.warnings)
+
+    def test_identity_of_a_real_bicycle_is_kept(self) -> None:
+        result = parse_listing_analysis(payload(), SCHEMA)
+        self.assertEqual(result.identity.brand, "Trek")
+        self.assertEqual(result.identity.model, "Marlin 7")
+        self.assertNotIn("ai_identity_dropped_not_a_bicycle", result.warnings)
+
     def test_absent_model_always_requests_manual_identification(self) -> None:
         result = parse_listing_analysis(
             payload(

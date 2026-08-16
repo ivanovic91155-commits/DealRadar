@@ -51,6 +51,42 @@ class RejectionTest(unittest.TestCase):
                 self.assertFalse(result.passed, title)
                 self.assertEqual(result.reason_code, REASON_PARTS)
 
+    def test_protective_gear_is_rejected_before_spending_a_call(self) -> None:
+        # Шлем POC Axion доехал до Telegram как «🚲 POC Axion»: в списке был
+        # английский "helmet", а объявления на Bazoši чешские.
+        for title in (
+            "Helma POC Axion 55-58",
+            "Cyklistická přilba Uvex",
+            "Brýle Rudy Project",
+            "Cyklistické rukavice Sportful",
+            "Zámek na kolo Abus",
+            "Nosič na kolo Thule",
+        ):
+            with self.subTest(title=title):
+                result = ai_prefilter(listing(title), CONFIG)
+                self.assertFalse(result.passed, title)
+                self.assertEqual(result.reason_code, REASON_PARTS)
+
+    def test_the_na_kolo_phrase_is_matched_in_its_most_common_form(self) -> None:
+        # Правило писалось под "sedačka na kolo", но регулярка ловила только
+        # "na kola"/"na kol": самая частая форма винительного падежа проходила.
+        for title in ("Držák telefonu na kolo", "Blikačka na kolo", "Košík na kolo"):
+            with self.subTest(title=title):
+                self.assertFalse(ai_prefilter(listing(title), CONFIG).passed, title)
+
+    def test_gear_next_to_a_real_bicycle_does_not_lose_the_listing(self) -> None:
+        # Продавец кладёт шлем в подарок — велосипед от этого не перестаёт быть
+        # велосипедом. "adresa" содержит "dres": короткие слова в списке
+        # экипировки утащили бы за собой настоящее объявление.
+        for title in (
+            "Prodám kolo Trek Marlin 7 + helma zdarma",
+            "Horské kolo Merida s nosičem a blatníky",
+            "Elektrokolo Haibike, v ceně zámek a brýle",
+            "Trek Marlin 7, adresa v popisu",
+        ):
+            with self.subTest(title=title):
+                self.assertTrue(ai_prefilter(listing(title), CONFIG).passed, title)
+
     def test_real_bicycles_are_not_caught_by_the_accessory_backstop(self) -> None:
         # "na kolo" ловит аксессуары, но настоящий велосипед в заголовке зовётся
         # "kolo"/"kola", а не "na kolo"; размер колёс "na 29 kolech" — не аксессуар.

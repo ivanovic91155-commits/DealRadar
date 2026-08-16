@@ -527,7 +527,7 @@ class Storage:
 
         def key(item: tuple[Listing, datetime]) -> tuple[object, ...]:
             listing, _ = item
-            price = listing.price_amount if listing.price_amount is not None else listing.price_czk
+            price = listing.comparable_price_czk
             return (
                 -len(normalize_text(listing.description)),
                 0 if price else 1,
@@ -776,14 +776,8 @@ class Storage:
                 and candidate_fingerprint == listing_description_fingerprint
             ):
                 continue
-            listing_price = (
-                listing.price_amount if listing.price_amount is not None else listing.price_czk
-            )
-            candidate_price = (
-                candidate.price_amount
-                if candidate.price_amount is not None
-                else candidate.price_czk
-            )
+            listing_price = listing.comparable_price_czk
+            candidate_price = candidate.comparable_price_czk
             candidate_contact = contact_fingerprint(f"{candidate.title}\n{candidate.description}")
             if (
                 listing_contact
@@ -851,7 +845,7 @@ class Storage:
         result: list[MarketComparable] = []
         for row in rows:
             candidate = Listing.from_dict(json.loads(row["data_json"]))
-            price = candidate.price_amount if candidate.price_amount is not None else candidate.price_czk
+            price = candidate.comparable_price_czk
             if not price or price <= 0:
                 continue
             identity = identify_listing(candidate)

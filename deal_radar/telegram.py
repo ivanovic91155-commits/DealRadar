@@ -13,6 +13,7 @@ from deal_radar.models import Listing, ListingAnalysis, Valuation
 
 SOURCE_LABELS = {
     "bazos": "Bazoš", "cyklobazar": "Cyklobazar",
+    "facebook_marketplace": "Facebook Marketplace",
     "bazos_cz": "Bazoš", "kleinanzeigen_de": "Kleinanzeigen",
     "marktplaats_nl": "Marktplaats", "buycycle": "Buycycle",
 }
@@ -389,9 +390,11 @@ class TelegramClient:
             published = listing.published_at.astimezone().strftime("%d.%m %H:%M")
         marketplace = SOURCE_LABELS.get(listing.source, listing.source)
         ai_line = "🔎 Ищу цены нового велосипеда…" if retail_enabled else "🔎 Поиск новой цены выключен"
+        # Площадки, у которых цена приходит не только в кронах, печатаются своей
+        # валютой; для Bazoš остаётся прежняя строка.
         price_line = (
             f"💰 Цена продавца: {format_seller_price(listing)}\n"
-            if listing.source == "cyklobazar"
+            if listing.source in {"cyklobazar", "facebook_marketplace"}
             else f"💰 {format_czk(listing.price_czk)}\n"
         )
         prefix = DIAGNOSTIC_HEADER if diagnostic_header else ""

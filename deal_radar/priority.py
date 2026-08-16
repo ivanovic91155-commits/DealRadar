@@ -104,7 +104,7 @@ def build_analysis(
     if identity.frame_size or identity.wheel_size:
         score = _add(reasons, score, weights["size_known"], "Размер велосипеда указан.")
 
-    seller_price = listing.price_amount if listing.price_amount is not None else listing.price_czk
+    seller_price = listing.comparable_price_czk
     if seller_price and seller_price > 0:
         score = _add(reasons, score, weights["numeric_price"], "Есть числовая цена продавца.")
     else:
@@ -181,7 +181,17 @@ def build_analysis(
 def select_lookup_candidates(
     items: list[tuple[Listing, ListingAnalysis]],
     budget: int,
+    *,
+    use_analysis_priority: bool = False,
 ) -> list[tuple[Listing, ListingAnalysis]]:
+    """Кому достанутся слоты платного рыночного анализа.
+
+    ``use_analysis_priority`` включает порядок по оценке AI Opportunity Gate:
+    объявление со скрытой возможностью или спешащим продавцом получает слот
+    раньше аккуратно оформленного, но обычного. Состав кандидатов при этом не
+    меняется — ворота управляют очередью, а не допуском.
+    """
+
     eligible = [
         item
         for item in items
@@ -192,7 +202,11 @@ def select_lookup_candidates(
     ]
     return sorted(
         eligible,
-        key=lambda item: (-item[1].preliminary_priority_score, item[0].key),
+        key=lambda item: (
+            -item[1].analysis_priority_score if use_analysis_priority else 0,
+            -item[1].preliminary_priority_score,
+            item[0].key,
+        ),
     )[: max(0, budget)]
 
 

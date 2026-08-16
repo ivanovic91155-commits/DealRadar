@@ -22,6 +22,7 @@ from deal_radar.config import (
     RetailConfig,
     SearchProfile,
     TelegramConfig,
+    TelegramGateConfig,
 )
 from deal_radar.http import HttpError
 from deal_radar.models import Listing
@@ -419,6 +420,9 @@ class ShadowModeCycleTest(unittest.TestCase):
             market_pricing=MarketPricingConfig(enabled=False),
             deal_scoring=DealScoringConfig(enabled=True),
             ai=ai,
+            # Здесь проверяется именно фаза AI, а не отбор карточек: у ворот
+            # Telegram своя сюита (tests/test_ai_gate.py).
+            telegram_gate=TelegramGateConfig(enabled=False),
         )
         config.validate()
         service = DealRadarService(config)
@@ -435,7 +439,15 @@ class ShadowModeCycleTest(unittest.TestCase):
             stats = service.process_once(telegram)
         finally:
             service.close()
-        self.assertFalse([key for key in stats if key.startswith("ai_")])
+        # ai_gate_* — отдельный детерминированный слой со своим выключателем,
+        # он работает и без AI; здесь проверяется, что фаза AI не запускалась.
+        self.assertFalse(
+            [
+                key
+                for key in stats
+                if key.startswith("ai_") and not key.startswith("ai_gate_")
+            ]
+        )
 
     def test_enabled_ai_without_a_key_does_not_stop_the_parser(self) -> None:
         service, telegram = self.build(AIConfig(enabled=True, api_key=""), [listing("nokey")])
@@ -445,7 +457,15 @@ class ShadowModeCycleTest(unittest.TestCase):
             service.close()
         self.assertEqual(stats["new"], 1)
         self.assertEqual(telegram.sent, ["nokey"])
-        self.assertFalse([key for key in stats if key.startswith("ai_")])
+        # ai_gate_* — отдельный детерминированный слой со своим выключателем,
+        # он работает и без AI; здесь проверяется, что фаза AI не запускалась.
+        self.assertFalse(
+            [
+                key
+                for key in stats
+                if key.startswith("ai_") and not key.startswith("ai_gate_")
+            ]
+        )
 
     def test_shadow_mode_stores_the_analysis_without_changing_decisions(self) -> None:
         items = [listing("shadow")]
@@ -503,9 +523,11 @@ class ShadowModeCycleTest(unittest.TestCase):
         self.assertEqual(stored.notification_status, "excluded")
         self.assertEqual(stored.notification_reason, "ai_not_a_bicycle")
 
-    def test_non_bike_is_untouched_while_ai_cannot_affect_status(self) -> None:
-        # Тот же ответ модели, но предохранитель can_affect_deal_status выключен:
-        # классификации не разрешено убирать карточку.
+    def test_non_bike_is_suppressed_even_without_deal_status_permission(self) -> None:
+        # can_affect_deal_status разрешает AI трогать статус сделки и цену.
+        # «Это шлем, а не велосипед» — вопрос релевантности, и из-за лишнего
+        # условия такие карточки уходили в Telegram у всех, кто оставил флаг
+        # статусов выключенным.
         items = [listing(external_id="kus", title="Nabizim pekny kus levne")]
         service, telegram = self.build(
             AIConfig(
@@ -523,8 +545,32 @@ class ShadowModeCycleTest(unittest.TestCase):
             stored = service.storage.get_analysis("bazos", "kus")
         finally:
             service.close()
+        self.assertNotIn("kus", telegram.sent)
+        assert stored is not None
+        self.assertEqual(stored.notification_reason, "ai_not_a_bicycle")
+
+    def test_shadow_mode_keeps_the_non_bike_verdict_unapplied_but_loud(self) -> None:
+        # В тени вердикт не применяется — это и есть смысл shadow-режима, — но
+        # в логе должно быть видно, какой именно флаг держит мусор в выдаче.
+        items = [listing(external_id="kus", title="Nabizim pekny kus levne")]
+        service, telegram = self.build(
+            AIConfig(enabled=True, api_key="sk-test", shadow_mode=True),
+            items,
+        )
+        poster = RecordingPoster(api_response(NOT_A_BIKE))
+        service._ai_analyzer = lambda: analyzer(poster)  # type: ignore[method-assign]
+        try:
+            with self.assertLogs("deal_radar.service", level="WARNING") as logs:
+                service.process_once(telegram)
+            stored = service.storage.get_analysis("bazos", "kus")
+        finally:
+            service.close()
         assert stored is not None
         self.assertNotEqual(stored.notification_reason, "ai_not_a_bicycle")
+        self.assertTrue(
+            [line for line in logs.output if "AI_SHADOW_MODE" in line],
+            logs.output,
+        )
 
     def test_second_cycle_reuses_the_cache_instead_of_paying_again(self) -> None:
         items = [listing("cached")]

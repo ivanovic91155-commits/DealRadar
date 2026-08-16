@@ -13,8 +13,10 @@ from deal_radar.ai.price_estimate import PriceEstimator
 from deal_radar.ai.prompt_loader import PromptNotFound, load_prompt
 from deal_radar.bike_identity import identify_listing
 from deal_radar.config import load_config, load_dotenv
+from deal_radar.http import HttpError
 from deal_radar.models import Listing
 from deal_radar.service import DealRadarService
+from deal_radar.sources.facebook import FacebookMarketplaceSource
 from deal_radar.telegram import TelegramClient
 
 
@@ -72,6 +74,12 @@ def build_parser() -> argparse.ArgumentParser:
     ai_price.add_argument("--title", default="")
     ai_price.add_argument("--description", default="")
     ai_price.add_argument("--price", type=int, default=None)
+    facebook = subparsers.add_parser(
+        "facebook-check",
+        help="Spend one ScrapeCreators credit on a single search; no Telegram, no state changes",
+    )
+    facebook.add_argument("--profile", help="Profile name from config.json; default is the first active one")
+    facebook.add_argument("--limit", type=int, default=5, help="How many normalised listings to print")
     return parser
 
 
@@ -223,6 +231,52 @@ def _ai_price_check(config, args) -> int:
     return 0 if estimate.status == "PRICE_OK" else 1
 
 
+def _facebook_check(config, args) -> int:
+    """Ручной smoke-test: ровно один поисковый запрос, ровно один credit.
+
+    В стандартный test suite не входит и в цикл не вмешивается: базу не
+    открывает, Telegram не трогает, ничего не сохраняет.
+    """
+
+    facebook = config.facebook_marketplace
+    if not facebook.api_key:
+        print("SCRAPECREATORS_API_KEY is empty; export it before running this check")
+        return 1
+    profiles = facebook.profiles if args.profile else facebook.active_profiles
+    if args.profile:
+        profiles = [profile for profile in profiles if profile.name == args.profile]
+    if not profiles:
+        print("No matching Facebook Marketplace profile in the config")
+        return 1
+    profile = profiles[0]
+    source = FacebookMarketplaceSource(profile, facebook)
+    print(f"Profile: {profile.name} | query={profile.query!r} radius={profile.radius_km}km")
+    try:
+        listings = source.fetch()
+    except HttpError as exc:
+        # Сообщение об ошибке ключа не содержит: его не печатает и http-слой.
+        print(f"Search failed: {exc}")
+        return 1
+    stats = source.last_stats
+    print(
+        f"HTTP ok | pages={stats.pages} listings={stats.listings} kept={stats.kept} "
+        f"credits_charged={stats.credits_charged:.0f} "
+        f"credits_remaining={'unknown' if stats.credits_remaining is None else int(stats.credits_remaining)} "
+        f"duration={stats.duration_ms}ms"
+    )
+    for listing in listings[: max(0, args.limit)]:
+        price = (
+            f"{listing.price_amount} {listing.currency}"
+            if listing.price_amount is not None
+            else listing.price_status
+        )
+        print(
+            f"  [{listing.external_id}] {listing.title[:60]} | {price} | "
+            f"czk={listing.price_czk} | {listing.location or '-'} | {listing.url}"
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(
@@ -260,6 +314,8 @@ def main(argv: list[str] | None = None) -> int:
         return _ai_test_listing(config, args)
     if args.command == "ai-price-check":
         return _ai_price_check(config, args)
+    if args.command == "facebook-check":
+        return _facebook_check(config, args)
 
     service = DealRadarService(config)
     try:

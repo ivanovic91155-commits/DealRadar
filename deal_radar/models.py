@@ -27,6 +27,23 @@ class Listing:
     def key(self) -> str:
         return f"{self.source}:{self.external_id}"
 
+    @property
+    def comparable_price_czk(self) -> int | None:
+        """Цена в кронах для сравнений и расчётов, либо ``None``.
+
+        До Facebook Marketplace все площадки были чешскими, и код спокойно брал
+        ``price_amount`` как кроны. С зарубежным источником это стало ложным
+        расчётом: 250 EUR рядом с медианой 20 000 Kč выглядят как скидка 98%.
+        Поэтому исходная сумма годится для сравнения только в кронах, а иначе
+        честнее пустота — пусть объявление уйдёт в ручную проверку.
+        """
+
+        if self.price_czk is not None:
+            return self.price_czk
+        if self.price_amount is not None and (self.currency or "CZK").upper() == "CZK":
+            return self.price_amount
+        return None
+
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["published_at"] = self.published_at.isoformat() if self.published_at else None
@@ -595,6 +612,15 @@ class ListingAnalysis:
     deal_evaluation: DealEvaluation | None = None
     ai_analysis: AIAnalysis | None = None
     ai_price: AIPriceEstimate | None = None
+    # --- AI Opportunity Gate: стоит ли тратить ресурсы на проверку ----------
+    analysis_priority_score: int = 0
+    analysis_priority_reasons: list[str] = field(default_factory=list)
+    ai_gate_action: str = ""  # DEEP_ANALYSIS | STANDARD | BLOCKED
+    # --- Telegram Notification Gate: стоит ли показывать это человеку -------
+    notification_priority_score: int = 0
+    notification_reasons: list[str] = field(default_factory=list)
+    telegram_gate_action: str = ""  # SEND | SKIP | BLOCK
+    telegram_gate_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

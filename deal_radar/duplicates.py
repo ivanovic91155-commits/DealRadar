@@ -91,8 +91,8 @@ def compare_listings(
 ) -> DuplicateMatch:
     if listing.source == candidate.source:
         return DuplicateMatch(reason="same_source")
-    listing_price = listing.price_amount if listing.price_amount is not None else listing.price_czk
-    candidate_price = candidate.price_amount if candidate.price_amount is not None else candidate.price_czk
+    listing_price = listing.comparable_price_czk
+    candidate_price = candidate.comparable_price_czk
     if not listing_price or listing_price != candidate_price:
         return DuplicateMatch(reason="price_mismatch")
 

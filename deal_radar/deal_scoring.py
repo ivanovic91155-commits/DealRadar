@@ -156,10 +156,19 @@ def select_deal_notifications(
         and enabled.get(item[1].deal_evaluation.status, False)
     ]
 
-    def key(item: tuple[Listing, ListingAnalysis, float]) -> tuple[int, float, str]:
+    def key(item: tuple[Listing, ListingAnalysis, float]) -> tuple[int, int, float, str]:
         evaluation = item[1].deal_evaluation
         assert evaluation is not None
-        return DEAL_STATUS_ORDER[evaluation.status], -evaluation.deal_score, item[0].key
+        # Статус остаётся первым: гарантированное преимущество качественного HOT
+        # не должно зависеть от ворот. Внутри статуса порядок задаёт важность
+        # для человека, и только затем — deal_score. Пока ворота выключены,
+        # notification_priority_score равен нулю у всех, и порядок прежний.
+        return (
+            DEAL_STATUS_ORDER[evaluation.status],
+            -item[1].notification_priority_score,
+            -evaluation.deal_score,
+            item[0].key,
+        )
 
     manual = sorted(
         [item for item in current if item[1].deal_evaluation.status == "MANUAL_REVIEW"],
