@@ -28,7 +28,7 @@ from deal_radar.ai_gate import (
     telegram_decision,
 )
 from deal_radar.config import AppConfig
-from deal_radar.bike_identity import configure_identity, identify_listing
+from deal_radar.bike_identity import configure_identity, hard_filter_reason, identify_listing
 from deal_radar.deal_scoring import DealEvaluator, select_deal_notifications
 from deal_radar.exchange_rates import ExchangeRateProvider
 from deal_radar.http import HttpError, get_bytes
@@ -797,6 +797,68 @@ class DealRadarService:
             )
         return enriched
 
+    def _enrich_facebook_details(self, new_listings: list[Listing]) -> int:
+        """Догрузить страницы объявлений Facebook: описание и все фотографии.
+
+        Поиск отдаёт только заголовок, цену и одну картинку — по такому входу
+        AI не назовёт ни модель, ни характеристики. Страница объявления даёт
+        описание, все кадры, настоящий код валюты и дату публикации, но стоит
+        ещё один credit, поэтому фаза включается отдельно и ограничена сверху.
+
+        Догружаются только объявления, которые вообще имеют шанс дойти до
+        человека: то, что уже отсеял дешёвый фильтр (запчасти, детские, «куплю»),
+        денег не стоит.
+        """
+
+        config = self.config.facebook_marketplace
+        if not (config.enabled and config.detail_enabled and config.api_key):
+            return 0
+        budget = config.max_details_per_run
+        if budget <= 0:
+            return 0
+        sources = [item for item in self.sources if isinstance(item, FacebookMarketplaceSource)]
+        if not sources:
+            return 0
+        candidates = [
+            listing
+            for listing in new_listings
+            if listing.source == FacebookMarketplaceSource.source_name
+            and not hard_filter_reason(listing)
+        ]
+        # Дневной потолок поверх потолка за цикл: счётчик лежит в metadata и
+        # переживает перезапуск, поэтому активный день не съедает запас credits.
+        day_key = f"facebook_details_{datetime.now(UTC):%Y%m%d}"
+        spent_today = int(self.storage.get_metadata(day_key, "0") or 0)
+        remaining_today = max(0, config.max_details_per_day - spent_today)
+        if remaining_today <= 0:
+            if candidates:
+                LOGGER.warning(
+                    "Facebook detail budget for today is spent (%d); %d listing(s) keep search data only",
+                    config.max_details_per_day,
+                    len(candidates),
+                )
+            return 0
+        budget = min(budget, remaining_today)
+        enriched = 0
+        for listing in candidates[:budget]:
+            before = listing.description
+            updated = sources[0].fetch_detail(listing)
+            self.storage.update_listing_description(updated)
+            if updated.detail_status == "detail" and (
+                updated.description != before or updated.image_urls
+            ):
+                enriched += 1
+            # Считаем сам запрос, а не удачу: credit списывается в любом случае.
+            spent_today += 1
+            self.storage.set_metadata(day_key, str(spent_today))
+        if len(candidates) > budget:
+            LOGGER.info(
+                "Facebook detail budget spent: %d of %d new listings enriched",
+                enriched,
+                len(candidates),
+            )
+        return enriched
+
     def collect_feedback(self, telegram: TelegramClient | None = None) -> int:
         if not self.config.telegram.bot_token:
             return 0
@@ -845,6 +907,9 @@ class DealRadarService:
         inserted = len(new_listings)
         # Описание догружается до анализа: и каталог, и AI читают уже полный текст.
         detail_fetches = self._enrich_cyklobazar_descriptions(new_listings)
+        # Facebook-объявления из поиска приходят почти пустыми; страница даёт
+        # описание и все фотографии, на которых AI и опознаёт велосипед.
+        facebook_details = self._enrich_facebook_details(new_listings)
         duplicate_stats = self.storage.backfill_duplicates(
             self.config.priority,
             description_loader=self._duplicate_detail_description,

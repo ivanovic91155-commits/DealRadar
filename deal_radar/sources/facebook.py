@@ -242,6 +242,87 @@ def parse_listing(
     # чтобы посчитать доллары кронами.
     if listing.currency == "CZK":
         listing.price_czk = price.amount
+    if listing.image_url:
+        listing.image_urls = [listing.image_url]
+    return listing
+
+
+def _photo_urls(payload: Any, limit: int) -> list[str]:
+    """Ссылки на все фотографии объявления, в порядке площадки."""
+
+    if not isinstance(payload, list):
+        return []
+    urls: list[str] = []
+    for entry in payload:
+        url = _image(entry) if isinstance(entry, dict) else None
+        if url and url not in urls:
+            urls.append(url)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def apply_detail(listing: Listing, payload: Any, config: FacebookMarketplaceConfig) -> Listing:
+    """Дополнить объявление данными со страницы: описание, фото, валюта, дата.
+
+    Поиск отдаёт только заголовок, цену и одну картинку — по ним модель
+    велосипеда почти не опознаётся. Здесь появляется всё остальное. Каждое
+    поле переписывается только когда оно действительно пришло: пустой ответ
+    не должен стирать то, что уже было.
+    """
+
+    if not isinstance(payload, dict):
+        listing.detail_status = "failed"
+        return listing
+    item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
+
+    description = _text(item.get("description"), 4000)
+    if description:
+        listing.description = description
+
+    photos = _photo_urls(item.get("photos"), config.max_photos_per_listing)
+    if photos:
+        listing.image_urls = photos
+        # Обложка карточки Telegram — первая фотография объявления.
+        listing.image_url = photos[0]
+    elif listing.image_url:
+        listing.image_urls = [listing.image_url]
+
+    published = _published_at(item)
+    if published is not None:
+        listing.published_at = published
+
+    location = _text(item.get("location_text"), 120)
+    if location:
+        listing.location = location
+
+    price = item.get("price")
+    if isinstance(price, dict):
+        # У страницы объявления код валюты приходит явно — это надёжнее, чем
+        # угадывать символ из строки вроде "CZK3,000".
+        currency = _text(price.get("currency"), 3).upper()
+        amount = price.get("amount")
+        if currency:
+            listing.currency = currency
+        if isinstance(amount, (int, float)) and not isinstance(amount, bool) and amount > 0:
+            listing.price_amount = int(amount)
+            listing.price_status = "numeric"
+            listing.price_origin = "detail_amount"
+        listing.price_czk = listing.price_amount if listing.currency == "CZK" else None
+
+    # Состояние из атрибутов площадки дописывается к описанию: детерминированный
+    # разбор состояния читает именно текст.
+    attributes = item.get("attributes")
+    if isinstance(attributes, list):
+        labels = [
+            f"{_text(entry.get('attribute_name'), 40)}: {_text(entry.get('label'), 60)}"
+            for entry in attributes
+            if isinstance(entry, dict) and _text(entry.get("label"), 60)
+        ]
+        if labels:
+            listing.description = f"{listing.description}\n{' · '.join(labels)}".strip()[:4000]
+
+    listing.detail_status = "detail"
     return listing
 
 
@@ -381,6 +462,41 @@ class FacebookMarketplaceSource:
         self.last_stats = stats
         self._log(stats)
         return list(collected.values())
+
+    def fetch_detail(self, listing: Listing) -> Listing:
+        """Догрузить страницу одного объявления. Стоит ещё один credit.
+
+        Ошибка не должна стоить объявления: карточка остаётся такой, какой её
+        отдал поиск, и просто помечается как необогащённая.
+        """
+
+        try:
+            payload = self._transport(
+                f"{self.config.base_url}/item",
+                params={"id": listing.external_id},
+                headers={"x-api-key": self.config.api_key},
+                timeout=self.config.timeout_seconds,
+            )
+        except HttpError as exc:
+            LOGGER.warning(
+                "Facebook detail failed for %s (%s); the listing keeps its search data",
+                listing.key,
+                exc.status_code or "network",
+            )
+            listing.detail_status = "failed"
+            return listing
+        enriched = apply_detail(listing, payload, self.config)
+        LOGGER.info(
+            "FACEBOOK_DETAIL listing=%s photos=%d description_chars=%d currency=%s "
+            "credits_charged=%s credits_remaining=%s",
+            listing.key,
+            len(enriched.image_urls),
+            len(enriched.description),
+            enriched.currency,
+            payload.get("credits_charged") if isinstance(payload, dict) else "?",
+            payload.get("credits_remaining") if isinstance(payload, dict) else "?",
+        )
+        return enriched
 
     def _log(self, stats: FacebookFetchStats) -> None:
         LOGGER.info(

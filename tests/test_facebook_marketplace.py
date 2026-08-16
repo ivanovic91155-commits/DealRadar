@@ -336,6 +336,111 @@ class CurrencyTest(unittest.TestCase):
         self.assertIsNone(parsed.amount)
 
 
+def detail_response(**overrides: Any) -> dict[str, Any]:
+    """Ответ страницы объявления: описание, вся галерея, валюта, дата."""
+
+    item: dict[str, Any] = {
+        "id": "1122334455",
+        "url": "https://www.facebook.com/marketplace/item/1122334455/",
+        "title": "Trek Marlin 7 2024",
+        "description": "Trek Marlin 7, rám 19\", kola 29\", Shimano Deore, hydraulické brzdy.",
+        "creation_time": "2026-08-16T09:30:00Z",
+        "location_text": "Praha 6, Czech Republic",
+        "price": {"amount": 14900, "currency": "CZK", "formatted_amount_zeros_stripped": "CZK14,900"},
+        "photos": [
+            {"id": "1", "url": "https://scontent.example/a.jpg"},
+            {"id": "2", "url": "https://scontent.example/b.jpg"},
+            {"id": "3", "url": "https://scontent.example/c.jpg"},
+        ],
+        "attributes": [{"attribute_name": "Condition", "value": "used_good", "label": "Used - good"}],
+        "is_sold": False,
+        "is_live": True,
+    }
+    item.update(overrides)
+    return {"success": True, "credits_charged": 1, "credits_remaining": 6097, **item}
+
+
+class DetailEnrichmentTest(unittest.TestCase):
+    """Страница объявления — единственный источник описания и всех фотографий."""
+
+    def test_detail_fills_description_photos_currency_and_date(self) -> None:
+        transport = RecordingTransport(response(), detail_response())
+        instance = source(transport, detail_enabled=True, max_details_per_run=5)
+        listing = instance.fetch()[0]
+        self.assertEqual(listing.description, "")  # поиск описания не даёт
+        enriched = instance.fetch_detail(listing)
+        self.assertIn("Shimano Deore", enriched.description)
+        self.assertIn("Condition: Used - good", enriched.description)
+        self.assertEqual(
+            enriched.image_urls,
+            [
+                "https://scontent.example/a.jpg",
+                "https://scontent.example/b.jpg",
+                "https://scontent.example/c.jpg",
+            ],
+        )
+        self.assertEqual(enriched.image_url, "https://scontent.example/a.jpg")
+        self.assertEqual(enriched.currency, "CZK")
+        self.assertEqual(enriched.price_czk, 14900)
+        self.assertEqual(enriched.location, "Praha 6, Czech Republic")
+        self.assertEqual(enriched.published_at, datetime(2026, 8, 16, 9, 30, tzinfo=UTC))
+        self.assertEqual(enriched.detail_status, "detail")
+
+    def test_the_detail_endpoint_is_called_with_the_listing_id(self) -> None:
+        transport = RecordingTransport(response(), detail_response())
+        instance = source(transport, detail_enabled=True, max_details_per_run=5)
+        instance.fetch_detail(instance.fetch()[0])
+        call = transport.calls[1]
+        self.assertTrue(call["url"].endswith("/item"))
+        self.assertEqual(call["params"], {"id": "1122334455"})
+        self.assertEqual(call["headers"], {"x-api-key": FAKE_KEY})
+
+    def test_the_photo_count_is_capped(self) -> None:
+        transport = RecordingTransport(response(), detail_response())
+        instance = source(transport, detail_enabled=True, max_details_per_run=5, max_photos_per_listing=2)
+        enriched = instance.fetch_detail(instance.fetch()[0])
+        self.assertEqual(len(enriched.image_urls), 2)
+
+    def test_a_real_currency_code_beats_the_guessed_symbol(self) -> None:
+        transport = RecordingTransport(
+            response(card(price={"formatted_amount": "14 900 Kč", "amount": 14900})),
+            detail_response(price={"amount": 600, "currency": "EUR"}),
+        )
+        instance = source(transport, detail_enabled=True, max_details_per_run=5)
+        enriched = instance.fetch_detail(instance.fetch()[0])
+        self.assertEqual(enriched.currency, "EUR")
+        self.assertEqual(enriched.price_amount, 600)
+        self.assertIsNone(enriched.price_czk)
+
+    def test_a_failed_detail_keeps_the_search_data(self) -> None:
+        transport = RecordingTransport(response(), HttpError("HTTP 500", 500))
+        instance = source(transport, detail_enabled=True, max_details_per_run=5)
+        listing = instance.fetch()[0]
+        enriched = instance.fetch_detail(listing)
+        self.assertEqual(enriched.detail_status, "failed")
+        self.assertEqual(enriched.title, "Trek Marlin 7 2024")
+        self.assertEqual(enriched.price_amount, 14900)
+
+    def test_an_empty_detail_does_not_erase_what_search_found(self) -> None:
+        transport = RecordingTransport(response(), {"success": True, "id": "1122334455"})
+        instance = source(transport, detail_enabled=True, max_details_per_run=5)
+        listing = instance.fetch()[0]
+        enriched = instance.fetch_detail(listing)
+        self.assertEqual(enriched.title, "Trek Marlin 7 2024")
+        self.assertEqual(enriched.price_amount, 14900)
+        self.assertEqual(enriched.image_urls, ["https://scontent.example/photo.jpg"])
+
+    def test_detail_is_disabled_by_default(self) -> None:
+        self.assertFalse(FacebookMarketplaceConfig().detail_enabled)
+        self.assertEqual(FacebookMarketplaceConfig().max_details_per_run, 0)
+
+    def test_enabling_detail_without_a_budget_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            FacebookMarketplaceConfig(
+                detail_enabled=True, max_details_per_run=0, profiles=[profile()]
+            ).validate()
+
+
 class ErrorHandlingTest(unittest.TestCase):
     def test_authentication_and_payment_errors_are_not_retried(self) -> None:
         for status in (400, 401, 402, 403, 404):
@@ -595,6 +700,70 @@ class ServiceIntegrationTest(unittest.TestCase):
         self.assertIsNone(analysis.deal_evaluation.purchase_price_czk)
         self.assertIn("purchase_price_czk", analysis.deal_evaluation.missing_fields)
         self.assertEqual(analysis.deal_evaluation.status, "MANUAL_REVIEW")
+
+    def _facebook_service(self, settings, transport):
+        service = DealRadarService(self.build(facebook_marketplace=settings, profiles=[]))
+        service.sources = [
+            FacebookMarketplaceSource(
+                settings.profiles[0], settings, transport=transport, sleeper=lambda _: None
+            )
+        ]
+        return service
+
+    def test_the_cycle_enriches_a_new_facebook_listing(self) -> None:
+        settings = config(detail_enabled=True, max_details_per_run=5)
+        transport = RecordingTransport(response(), detail_response())
+        service = self._facebook_service(settings, transport)
+        try:
+            service.process_once(FakeTelegram())
+            stored = service.storage.get_listing("facebook_marketplace", "1122334455")
+        finally:
+            service.close()
+        assert stored is not None
+        self.assertIn("Shimano Deore", stored.description)
+        self.assertEqual(len(stored.image_urls), 3)
+        self.assertEqual(stored.detail_status, "detail")
+
+    def test_detail_is_not_spent_on_listings_the_hard_filter_rejects(self) -> None:
+        settings = config(detail_enabled=True, max_details_per_run=5)
+        transport = RecordingTransport(
+            response(card(id="helmet", title="Helma POC Axion 55-58")), detail_response()
+        )
+        service = self._facebook_service(settings, transport)
+        try:
+            service.process_once(FakeTelegram())
+        finally:
+            service.close()
+        # Только поиск: за шлем платить второй раз незачем.
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_the_daily_detail_cap_stops_spending(self) -> None:
+        settings = config(detail_enabled=True, max_details_per_run=5, max_details_per_day=1)
+        transport = RecordingTransport(
+            response(card(id="a"), card(id="b")), detail_response(), detail_response()
+        )
+        service = self._facebook_service(settings, transport)
+        try:
+            service.process_once(FakeTelegram())
+        finally:
+            service.close()
+        # Один поиск плюс ровно один detail: дневной потолок держит расход.
+        self.assertEqual(len(transport.calls), 2)
+
+    def test_the_daily_cap_survives_a_restart(self) -> None:
+        settings = config(detail_enabled=True, max_details_per_run=5, max_details_per_day=1)
+        first = self._facebook_service(settings, RecordingTransport(response(card(id="a")), detail_response()))
+        try:
+            first.process_once(FakeTelegram())
+        finally:
+            first.close()
+        second_transport = RecordingTransport(response(card(id="b")), detail_response())
+        second = self._facebook_service(settings, second_transport)
+        try:
+            second.process_once(FakeTelegram())
+        finally:
+            second.close()
+        self.assertEqual(len(second_transport.calls), 1)  # только поиск
 
     def test_no_log_line_of_a_cycle_contains_the_key(self) -> None:
         transport = RecordingTransport(response(card()))

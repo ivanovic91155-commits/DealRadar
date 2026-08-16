@@ -273,6 +273,51 @@ class VisionTest(unittest.TestCase):
         analyzer(poster).analyze(listing())
         self.assertIsInstance(poster.calls[0]["input"][1]["content"], str)
 
+    def test_the_whole_gallery_is_attached_when_the_source_has_one(self) -> None:
+        # По обложке видно, велосипед это или шлем; чтобы назвать модель, нужны
+        # рама, привод и навесное с разных ракурсов. Facebook отдаёт галерею.
+        poster = RecordingPoster()
+        item = listing_with_photo()
+        item.image_urls = [
+            "https://img.test/a.jpg",
+            "https://img.test/b.jpg",
+            "https://img.test/c.jpg",
+        ]
+        analyzer(poster).analyze(item)
+        content = poster.calls[0]["input"][1]["content"]
+        urls = [part["image_url"] for part in content if part.get("type") == "input_image"]
+        self.assertEqual(urls, item.image_urls)
+
+    def test_the_gallery_is_capped_by_configuration(self) -> None:
+        poster = RecordingPoster()
+        item = listing_with_photo()
+        item.image_urls = [f"https://img.test/{index}.jpg" for index in range(9)]
+        analyzer(poster, vision_max_images=3).analyze(item)
+        content = poster.calls[0]["input"][1]["content"]
+        urls = [part["image_url"] for part in content if part.get("type") == "input_image"]
+        self.assertEqual(len(urls), 3)
+
+    def test_the_model_is_told_how_many_photos_it_got(self) -> None:
+        instance = analyzer(RecordingPoster())
+        item = listing_with_photo()
+        item.image_urls = ["https://img.test/a.jpg", "https://img.test/b.jpg"]
+        self.assertEqual(instance.build_payload(item, None)["image_count"], 2)
+
+    def test_a_source_with_one_photo_is_unchanged(self) -> None:
+        poster = RecordingPoster()
+        analyzer(poster).analyze(listing_with_photo())
+        content = poster.calls[0]["input"][1]["content"]
+        urls = [part["image_url"] for part in content if part.get("type") == "input_image"]
+        self.assertEqual(urls, ["https://img.test/bike.jpg"])
+
+    def test_new_photos_invalidate_the_cached_analysis(self) -> None:
+        # После обогащения объявление обязано быть разобрано заново, а не
+        # отдано кэшем по обложке.
+        bare = listing_with_photo()
+        enriched = listing_with_photo()
+        enriched.image_urls = ["https://img.test/a.jpg", "https://img.test/b.jpg"]
+        self.assertNotEqual(content_fingerprint(bare), content_fingerprint(enriched))
+
     def test_vision_failure_retries_without_the_image_and_flags_it(self) -> None:
         # Модель могла отвергнуть картинку (например, она не мультимодальна).
         # Зрение не должно ухудшать текстовый разбор: повтор без фото проходит.
@@ -296,7 +341,7 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual(result.identity.model, "Marlin 7")
         self.assertEqual(result.condition.claimed_condition, "GOOD")
         self.assertEqual(result.schema_version, "dealradar.ai-analysis.v1")
-        self.assertEqual(result.prompt_version, "v1.2.0")
+        self.assertEqual(result.prompt_version, "v1.3.0")
         self.assertGreater(result.estimated_cost_usd, 0)
 
     def test_call_log_carries_the_documented_fields(self) -> None:

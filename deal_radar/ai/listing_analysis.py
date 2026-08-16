@@ -44,8 +44,12 @@ def content_fingerprint(listing: Listing) -> str:
         listing.title,
         listing.description,
         "" if listing.price_czk is None else str(listing.price_czk),
+        "" if listing.price_amount is None else str(listing.price_amount),
         listing.currency,
         listing.image_url or "",
+        # Догруженные фотографии — часть входа: после обогащения объявление
+        # обязано быть проанализировано заново, а не отдано кэшем по обложке.
+        "\x1e".join(listing.image_urls),
     )
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
@@ -104,13 +108,31 @@ class ListingAnalyzer:
             "source_listing_id": listing.external_id,
             "title": sanitize_text(listing.title, self.config.max_title_chars),
             "description": sanitize_text(listing.description, self.config.max_description_chars),
-            "price": listing.price_czk,
+            # Цена в валюте объявления: у зарубежных площадок price_czk пуст, и
+            # без этого модель видела бы объявление вообще без цены.
+            "price": listing.price_czk if listing.price_czk is not None else listing.price_amount,
             "currency": listing.currency,
             "location": sanitize_text(listing.location or "", 120) or None,
             "published_at": listing.published_at.isoformat() if listing.published_at else None,
-            "image_count": 1 if listing.image_url else 0,
+            "image_count": len(self.images_for(listing) or []),
             "deterministic_hints": hints,
         }
+
+    def images_for(self, listing: Listing) -> list[str] | None:
+        """Фотографии объявления для запроса, или ``None``.
+
+        Одного кадра хватает, чтобы отличить велосипед от шлема, но не чтобы
+        назвать модель: рама, привод и навесное видны с разных ракурсов.
+        Поэтому уходят все догруженные фотографии, а обложка — запасной вариант
+        для площадок, которые больше одной не отдают.
+        """
+
+        if not self.config.vision_enabled:
+            return None
+        urls = [url for url in listing.image_urls if url]
+        if not urls and listing.image_url:
+            urls = [listing.image_url]
+        return urls[: max(1, self.config.vision_max_images)] or None
 
     # -- результаты без обращения к API --------------------------------------
 
@@ -154,11 +176,7 @@ class ListingAnalyzer:
             "started_at": started_at.isoformat(),
         }
         user_message = self.prompt.build_user_message(self.build_payload(listing, identity))
-        image_urls = (
-            [listing.image_url]
-            if self.config.vision_enabled and listing.image_url
-            else None
-        )
+        image_urls = self.images_for(listing)
         vision_dropped = False
         try:
             result = self._structured(user_message, image_urls)

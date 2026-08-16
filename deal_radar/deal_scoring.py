@@ -156,17 +156,43 @@ def select_deal_notifications(
         and enabled.get(item[1].deal_evaluation.status, False)
     ]
 
-    def key(item: tuple[Listing, ListingAnalysis, float]) -> tuple[int, int, float, str]:
+    # Очередь внутри источника: у каждой площадки свой счётчик 0, 1, 2…
+    # Нужен для честного тай-брейка ниже, поэтому считается один раз по уже
+    # упорядоченному списку.
+    source_rank: dict[str, int] = {}
+    per_source: dict[str, int] = {}
+    for listing, analysis, _age in sorted(
+        current,
+        key=lambda item: (
+            DEAL_STATUS_ORDER[item[1].deal_evaluation.status],
+            -item[1].notification_priority_score,
+            -item[1].deal_evaluation.deal_score,
+            item[0].key,
+        ),
+    ):
+        rank = per_source.get(listing.source, 0)
+        source_rank[listing.key] = rank
+        per_source[listing.source] = rank + 1
+
+    def key(item: tuple[Listing, ListingAnalysis, float]) -> tuple[int, int, float, int, str]:
         evaluation = item[1].deal_evaluation
         assert evaluation is not None
         # Статус остаётся первым: гарантированное преимущество качественного HOT
         # не должно зависеть от ворот. Внутри статуса порядок задаёт важность
         # для человека, и только затем — deal_score. Пока ворота выключены,
         # notification_priority_score равен нулю у всех, и порядок прежний.
+        #
+        # Последним тай-брейком раньше стоял listing.key — то есть алфавит:
+        # "bazos:" < "cyklobazar:" < "facebook_marketplace:". Когда у всех
+        # объявлений рыночных данных нет и score одинаковый (обычное дело для
+        # MANUAL_REVIEW), Bazoš забирал все слоты, а Facebook не попадал в
+        # Telegram никогда. Теперь при равном счёте площадки идут по очереди:
+        # первая карточка каждого источника раньше второй карточки любого.
         return (
             DEAL_STATUS_ORDER[evaluation.status],
             -item[1].notification_priority_score,
             -evaluation.deal_score,
+            source_rank.get(item[0].key, 0),
             item[0].key,
         )
 

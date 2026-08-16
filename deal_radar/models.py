@@ -22,6 +22,13 @@ class Listing:
     raw_price_text: str = ""
     price_status: str = ""
     price_origin: str = ""
+    # Все фотографии объявления, если площадка их отдаёт. ``image_url`` остаётся
+    # первой/обложечной: её показывает Telegram. Список читает только AI —
+    # по одному кадру модель велосипеда угадывается плохо, а по раме, навесному
+    # и приводу с разных ракурсов уже заметно лучше.
+    image_urls: list[str] = field(default_factory=list)
+    # Что удалось догрузить со страницы объявления: "" | "detail" | "failed".
+    detail_status: str = ""
 
     @property
     def key(self) -> str:

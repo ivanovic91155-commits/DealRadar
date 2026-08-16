@@ -148,7 +148,19 @@ class FacebookMarketplaceConfig:
     max_retries: int = 2
     max_pages_per_profile: int = 1
     results_per_page: int = 24
+    # Поиск отдаёт только заголовок, цену и одно фото. Страница объявления даёт
+    # описание, все фотографии, настоящий код валюты и дату публикации — то
+    # есть всё, на чём AI вообще может опознать модель. Каждая такая карточка
+    # стоит ещё один credit, поэтому включается отдельно и с потолком за цикл.
+    detail_enabled: bool = False
     max_details_per_run: int = 0
+    # Потолок за сутки UTC поверх потолка за цикл: объявление обогащается один
+    # раз в жизни, но в активный день новых карточек может быть много, а запас
+    # credits конечен. Счётчик переживает перезапуск (лежит в metadata).
+    max_details_per_day: int = 40
+    # Сколько фотографий уходит в AI. Больше кадров — лучше опознание рамы и
+    # навесного, но и дороже вызов модели.
+    max_photos_per_listing: int = 5
     date_listed: str = "last_24_hours"
     # Общий цикл проекта короче интервала (по умолчанию 420 секунд), а каждый
     # поиск здесь стоит денег: без собственного интервала один профиль сжёг бы
@@ -170,6 +182,14 @@ class FacebookMarketplaceConfig:
             raise ValueError("facebook_marketplace.results_per_page must be between 1 and 100")
         if self.max_details_per_run < 0:
             raise ValueError("facebook_marketplace.max_details_per_run must not be negative")
+        if not 1 <= self.max_photos_per_listing <= 10:
+            raise ValueError("facebook_marketplace.max_photos_per_listing must be between 1 and 10")
+        if self.detail_enabled and self.max_details_per_run <= 0:
+            raise ValueError(
+                "facebook_marketplace.detail_enabled needs a positive max_details_per_run"
+            )
+        if self.max_details_per_day < 0:
+            raise ValueError("facebook_marketplace.max_details_per_day must not be negative")
         if self.min_interval_seconds < 0:
             raise ValueError("facebook_marketplace.min_interval_seconds must not be negative")
         allowed_dates = {"all", "1", "7", "30", "last_24_hours", "last_7_days", "last_30_days"}
@@ -271,7 +291,7 @@ class AIConfig:
     fallback_cached_input_usd_per_1m: float = 0.20
     fallback_output_usd_per_1m: float = 12.00
     prompt_name: str = "listing-analysis"
-    prompt_version: str = "v1.2.0"
+    prompt_version: str = "v1.3.0"
     prompts_path: str = ""  # пусто -> каталог, поставляемый вместе с пакетом
 
     # --- Зрение: первое фото объявления уходит в Level 1 --------------------
@@ -282,6 +302,10 @@ class AIConfig:
     vision_enabled: bool = True
     vision_model: str = ""
     vision_detail: str = "low"  # low | high | auto
+    # Сколько кадров уходит в один вызов. По обложке видно, велосипед это или
+    # шлем; чтобы назвать модель, нужны рама, привод и навесное с разных
+    # ракурсов. Площадки, отдающие одно фото, ничего не теряют.
+    vision_max_images: int = 5
     # Классификации разрешено убирать карточку, только когда она уверенно
     # решила, что объявление — не велосипед. Порог намеренно высокий: пустой
     # результат лучше, чем спрятанный настоящий велосипед. Само подавление
@@ -336,6 +360,8 @@ class AIConfig:
             raise ValueError("ai text limits are too small to analyse a listing")
         if self.vision_detail not in {"low", "high", "auto"}:
             raise ValueError("ai.vision_detail must be one of low, high, auto")
+        if not 1 <= self.vision_max_images <= 10:
+            raise ValueError("ai.vision_max_images must be between 1 and 10")
         if not 0 < self.min_reject_confidence <= 1:
             raise ValueError("ai.min_reject_confidence must be between 0 and 1")
         if self.cache_ttl_hours < 0:
@@ -1080,9 +1106,21 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
                 "FACEBOOK_MARKETPLACE_RESULTS_PER_PAGE",
                 int(facebook_raw.get("results_per_page", 24)),
             ),
+            detail_enabled=_env_bool(
+                "FACEBOOK_MARKETPLACE_DETAIL_ENABLED",
+                bool(facebook_raw.get("detail_enabled", False)),
+            ),
             max_details_per_run=_env_int(
                 "FACEBOOK_MARKETPLACE_MAX_DETAILS_PER_RUN",
                 int(facebook_raw.get("max_details_per_run", 0)),
+            ),
+            max_details_per_day=_env_int(
+                "FACEBOOK_MARKETPLACE_MAX_DETAILS_PER_DAY",
+                int(facebook_raw.get("max_details_per_day", 40)),
+            ),
+            max_photos_per_listing=_env_int(
+                "FACEBOOK_MARKETPLACE_MAX_PHOTOS",
+                int(facebook_raw.get("max_photos_per_listing", 5)),
             ),
             date_listed=str(facebook_raw.get("date_listed", "last_24_hours")),
             min_interval_seconds=_env_int(
@@ -1175,11 +1213,14 @@ def load_config(path: str | Path = "config.json") -> AppConfig:
                 float(ai_raw.get("fallback_output_usd_per_1m", 12.00)),
             ),
             prompt_name=str(ai_raw.get("prompt_name", "listing-analysis")),
-            prompt_version=str(ai_raw.get("prompt_version", "v1.2.0")),
+            prompt_version=str(ai_raw.get("prompt_version", "v1.3.0")),
             prompts_path=str(ai_raw.get("prompts_path", "")),
             vision_enabled=_env_bool("AI_VISION_ENABLED", bool(ai_raw.get("vision_enabled", True))),
             vision_model=_env_str("OPENAI_VISION_MODEL", str(ai_raw.get("vision_model", ""))),
             vision_detail=_env_str("OPENAI_VISION_DETAIL", str(ai_raw.get("vision_detail", "low"))),
+            vision_max_images=_env_int(
+                "OPENAI_VISION_MAX_IMAGES", int(ai_raw.get("vision_max_images", 5))
+            ),
             min_reject_confidence=_env_float(
                 "AI_MIN_REJECT_CONFIDENCE", float(ai_raw.get("min_reject_confidence", 0.75))
             ),
