@@ -336,12 +336,28 @@ class NotificationPriorityTest(unittest.TestCase):
         self.assertEqual(decision.reason, "blocking_risk_not_a_bicycle")
 
     def test_scenario_f_manual_review_without_a_signal_is_not_sent(self) -> None:
+        # AI живой и назвал объявление обычным — вот тогда гасим.
         decision = self.decide(
             deal("MANUAL_REVIEW", deal_score=40.0),
             ai_analysis(hidden_opportunity=False, seller_urgency="LOW", listing_quality="LOW"),
         )
         self.assertEqual(decision.action, SKIP)
         self.assertEqual(decision.reason, "no_strong_signal")
+
+    def test_manual_review_is_deferred_when_no_ai_signal_exists(self) -> None:
+        # Тот же обычный MANUAL_REVIEW, но AI в тени/выключен: сигналов нет,
+        # значит нет и основания прятать карточку — её судьбу решает отбор
+        # слотов, как до ворот. Иначе в тени канал молчит целиком.
+        decision = self.decide(deal("MANUAL_REVIEW", deal_score=40.0), None, live=False)
+        self.assertEqual(decision.action, SEND)
+        self.assertEqual(decision.reason, "no_ai_signals_defer_to_slots")
+
+    def test_a_failed_ai_result_does_not_suppress_a_manual_review(self) -> None:
+        # AI живой, но по этому объявлению разбор не удался: судить не по чему,
+        # прятать на отсутствии информации нельзя.
+        decision = self.decide(deal("MANUAL_REVIEW", deal_score=40.0), ai_analysis(status="AI_FAILED"))
+        self.assertEqual(decision.action, SEND)
+        self.assertEqual(decision.reason, "no_ai_signals_defer_to_slots")
 
     def test_scenario_g_manual_review_with_hidden_opportunity_is_sent(self) -> None:
         decision = self.decide(
@@ -604,7 +620,11 @@ class GateCycleTest(unittest.TestCase):
         service.sources = [FakeSource(items)]
         return service, FakeTelegram()
 
-    def test_plain_manual_review_is_no_longer_sent_but_stays_in_the_database(self) -> None:
+    def test_manual_review_defers_to_slots_when_ai_is_off(self) -> None:
+        # Без живого AI ворота не видят hidden_opportunity и seller_urgency,
+        # поэтому не имеют оснований прятать MANUAL_REVIEW — иначе в тени
+        # (текущий прод) канал замолкает целиком. Решение отдаётся обычному
+        # отбору слотов, как было до Session 1.
         service, telegram = self.build([listing("plain")])
         try:
             stats = service.process_once(telegram)
@@ -612,13 +632,35 @@ class GateCycleTest(unittest.TestCase):
         finally:
             service.close()
         self.assertEqual(stats["deal_manual_review"], 1)
+        self.assertEqual(telegram.sent, ["plain"])
+        self.assertEqual(stats["manual_review_suppressed"], 0)
+        self.assertEqual(stats["manual_review_sent"], 1)
+        assert stored is not None
+        self.assertEqual(stored.notification_status, "sent")
+        self.assertEqual(stored.telegram_gate_reason, "no_ai_signals_defer_to_slots")
+
+    def test_plain_noise_manual_review_is_suppressed_only_when_ai_is_live(self) -> None:
+        # Когда AI выведен из тени и назвал объявление обычным (нет скрытой
+        # возможности, продавец не спешит, цена не аномальна), ворота его
+        # заслуженно гасят — вот та шумоподавляющая работа, ради которой они и
+        # добавлялись.
+        item = listing("noise", title="Kolo", price=8000)
+        service, telegram = self.build(
+            [item], ai=AIConfig(enabled=True, api_key="sk-test", shadow_mode=False)
+        )
+        service._ai_analyzer = lambda: StubAnalyzer(  # type: ignore[method-assign]
+            {"noise": ai_analysis(hidden_opportunity=False, seller_urgency="LOW", listing_quality="LOW")}
+        )
+        try:
+            stats = service.process_once(telegram)
+            stored = service.storage.get_analysis("bazos", "noise")
+        finally:
+            service.close()
         self.assertEqual(telegram.sent, [])
         self.assertEqual(stats["manual_review_suppressed"], 1)
-        self.assertEqual(stats["manual_review_sent"], 0)
         assert stored is not None
         self.assertEqual(stored.notification_status, "not_selected")
         self.assertEqual(stored.notification_reason, "telegram_gate_no_strong_signal")
-        self.assertTrue(stored.notification_reasons)
 
     def test_hidden_opportunity_lets_a_manual_review_through(self) -> None:
         item = listing("hidden", title="Scott kolo", price=5000)
@@ -645,6 +687,9 @@ class GateCycleTest(unittest.TestCase):
         self.assertIn("hidden_opportunity:+30", stored.analysis_priority_reasons)
 
     def test_shadow_mode_keeps_the_ai_signals_unused(self) -> None:
+        # В тени AI-разбор сохраняется, но в ворота не попадает: приоритет
+        # считается без него (ai_unavailable). При этом карточку не глушим —
+        # раз сигналов нет, MANUAL_REVIEW уходит в обычный отбор слотов.
         item = listing("shadow", title="Scott kolo", price=5000)
         service, telegram = self.build(
             [item],
@@ -658,10 +703,11 @@ class GateCycleTest(unittest.TestCase):
             stored = service.storage.get_analysis("bazos", "shadow")
         finally:
             service.close()
-        self.assertEqual(telegram.sent, [])
+        self.assertEqual(telegram.sent, ["shadow"])
         assert stored is not None and stored.ai_analysis is not None
         self.assertEqual(stored.ai_analysis.status, "AI_OK")
         self.assertIn("ai_unavailable:+0", stored.analysis_priority_reasons)
+        self.assertEqual(stored.telegram_gate_reason, "no_ai_signals_defer_to_slots")
 
     def test_hot_still_reaches_telegram_with_the_gate_on(self) -> None:
         class MarketFinder:

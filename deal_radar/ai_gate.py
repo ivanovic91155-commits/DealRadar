@@ -401,6 +401,16 @@ def telegram_decision(
             decision.reason = decision.strong_signals[0]
         elif decision.score >= config.manual_review_min_score:
             decision.action, decision.reason = SEND, "notification_score"
+        elif not signals.available:
+            # У объявления нет ни одного AI-сигнала: слой в тени, выключен или
+            # не дошёл до этой карточки. Спасение MANUAL_REVIEW построено на
+            # hidden_opportunity и seller_urgency, а их сейчас взять неоткуда —
+            # значит ворота не могут отличить скрытую возможность от шума и не
+            # вправе тихо гасить всю категорию. Решение отдаётся обычному отбору
+            # слотов (select_deal_notifications с manual_review_reserved_slots),
+            # как было до Session 1. Ценовая аномалия AI не требует и уже прошла
+            # бы выше сильным сигналом.
+            decision.action, decision.reason = SEND, "no_ai_signals_defer_to_slots"
         else:
             decision.action = SKIP
             decision.reason = (
